@@ -1,0 +1,21 @@
+{
+  "name": "docbridge",
+  "version": "1.0.0",
+  "description": "零侵入英文技术文档翻译 Chrome 扩展",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch --mode development",
+    "build": "vite build && tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.279",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11"
+  },
+  "dependencies": {
+    "dexie": "^4.0.4",
+    "tesseract.js": "^5.1.0"
+  }
+}
