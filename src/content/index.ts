@@ -70,6 +70,11 @@ async function translatePage(): Promise<void> {
         console.log(`[DocBridge] 翻译进度: ${done}/${total}`);
       },
       onComplete: (results) => {
+        console.log(`[DocBridge] onComplete: ${results.length} 个结果 → 传入 renderer`);
+        if (results.length > 0) {
+          const sample = results[0];
+          console.log('[DocBridge] 首个结果:', sample.id, '译文:', sample.translatedText?.slice(0, 50), 'originalUnit:', sample.originalUnit ? '存在' : 'NULL');
+        }
         if (renderer) renderer.render(results);
         console.log(`[DocBridge] 翻译完成: ${results.length} 个单元已渲染`);
         isTranslating = false;

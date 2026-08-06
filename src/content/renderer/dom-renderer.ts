@@ -30,14 +30,20 @@ export class DOMRenderer {
    * 渲染译文：在每个单元元素内部末尾插入 dt-bridge 节点
    */
   render(units: TranslatedUnit[]): void {
+    console.log('[DocBridge] DOMRenderer.render 收到', units.length, '个译文单元');
+    let skipped = 0;
+    let rendered = 0;
     for (const unit of units) {
       try {
-        this.renderOne(unit);
+        const result = this.renderOne(unit);
+        if (result === 'skipped') skipped++;
+        else if (result === 'rendered') rendered++;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(`[DocBridge] 渲染单元 ${unit.id} 失败:`, msg);
       }
     }
+    console.log(`[DocBridge] 渲染完成: ${rendered} 个已渲染, ${skipped} 个跳过`);
   }
 
   /**
@@ -77,20 +83,30 @@ export class DOMRenderer {
   // ---------- 私有方法 ----------
 
   /**
-   * 渲染单个译文单元
+   * 渲染单个译文单元，返回 'rendered' | 'skipped' 用于统计
    */
-  private renderOne(unit: TranslatedUnit): void {
-    // originalUnit 在 background SW 返回时可能为 null，跳过
-    if (!unit.originalUnit) return;
+  private renderOne(unit: TranslatedUnit): 'rendered' | 'skipped' {
+    if (!unit.originalUnit) {
+      console.warn(`[DocBridge] 跳过 ${unit.id}: originalUnit 为 null (SW 无 DOM)`);
+      return 'skipped';
+    }
     const el = unit.originalUnit.element;
-    // 元素引用为空或已不在 DOM 中，跳过
-    if (!el || !document.contains(el)) return;
-    // 已翻译过的跳过
-    if (el.hasAttribute('data-dt-translated')) return;
+    if (!el) {
+      console.warn(`[DocBridge] 跳过 ${unit.id}: element 引用为空`);
+      return 'skipped';
+    }
+    if (!document.contains(el)) {
+      console.warn(`[DocBridge] 跳过 ${unit.id}: 元素已脱离 DOM`);
+      return 'skipped';
+    }
+    if (el.hasAttribute('data-dt-translated')) {
+      return 'skipped';
+    }
 
     const wrapper = this.buildBridge(unit);
     el.appendChild(wrapper);
     el.setAttribute('data-dt-translated', 'true');
+    return 'rendered';
   }
 
   /**

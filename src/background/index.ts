@@ -104,13 +104,16 @@ async function clearExpiredCache(): Promise<void> {
 
 chrome.runtime.onMessage.addListener(
   (message: DTMessage, sender, sendResponse) => {
-    handleMessage(message, sender)
-      .then((result) => sendResponse(result))
-      .catch((err: unknown) => {
+    (async () => {
+      try {
+        const result = await handleMessage(message, sender);
+        sendResponse(result);
+      } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         console.error('[DocBridge] 消息处理失败:', errorMsg);
-        sendResponse({ error: errorMsg });
-      });
+        sendResponse({ success: false, error: errorMsg });
+      }
+    })();
     return true;
   }
 );
@@ -139,11 +142,16 @@ async function handleMessage(
     }
 
     case 'TRANSLATE': {
+      console.log('[DocBridge] background 收到 TRANSLATE 消息, units:', (message.payload as Record<string, unknown>).units
+        ? (message.payload as { units: Array<{ id: string }> }).units.length : 0);
       const { units, glossary, targetLang } = message.payload as {
         units: TranslationRequest['units'];
         glossary: Record<string, string>;
         targetLang: string;
       };
+
+      // 检查 Provider 状态
+      console.log('[DocBridge] translateProvider 状态:', translateProvider ? '已初始化' : 'NULL (无API Key)');
 
       // 先查缓存，未命中才请求 API
       const cached: Array<{ id: string; translatedText: string }> = [];
@@ -158,15 +166,23 @@ async function handleMessage(
           uncached.push(unit);
         }
       }
+      console.log('[DocBridge] 缓存命中:', cached.length, ', 未命中:', uncached.length);
 
       // 未命中部分调用 DeepSeek
+      if (uncached.length > 0 && !translateProvider) {
+        console.error('[DocBridge] API Key 未配置，无法翻译');
+        throw new Error('DeepSeek API Key 未配置');
+      }
+
       if (uncached.length > 0 && translateProvider) {
+        console.log('[DocBridge] 开始调用 DeepSeek API, 单元数:', uncached.length);
         const request: TranslationRequest = {
           units: uncached,
           glossary,
           targetLang,
         };
         const translated = await translateProvider.translate(request);
+        console.log('[DocBridge] DeepSeek 返回', translated.length, '条翻译');
         // 写入缓存
         for (const t of translated) {
           const original = uncached.find((u) => u.id === t.id);
@@ -178,14 +194,8 @@ async function handleMessage(
         }
       }
 
-      // 将结果发回请求的 tab
-      if (sender.tab?.id != null) {
-        await chrome.tabs.sendMessage(sender.tab.id, {
-          type: 'TRANSLATE_RESULT',
-          payload: { results: cached },
-        } satisfies DTMessage);
-      }
-      return { success: true, cached: cached.length, total: units.length };
+      console.log('[DocBridge] background 返回翻译结果:', cached.length, '条');
+      return { success: true, data: cached };
     }
 
     case 'TOGGLE_DISPLAY': {

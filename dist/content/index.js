@@ -273,24 +273,17 @@ class UnitBuilder {
   }
 }
 const BATCH_DELAY_MS = 300;
+const MESSAGE_TIMEOUT_MS = 8e3;
 class TranslationQueue {
   constructor(callbacks) {
-    this.pendingResolver = null;
-    this.listenerRegistered = false;
     this.isRunning = false;
-    this.handleMessage = (message) => {
-      if (message.type === "TRANSLATE_RESULT" && this.pendingResolver) {
-        const { results } = message.payload;
-        this.pendingResolver(results);
-      }
-    };
     this.onProgress = callbacks.onProgress;
     this.onComplete = callbacks.onComplete;
     this.onError = callbacks.onError;
-    this.registerListener();
   }
   /**
    * 启动翻译：逐批次发送、等待结果、上报进度
+   * 检测到扩展上下文失效后立即中止，避免无效等待
    */
   async start(batches) {
     if (this.isRunning) return;
@@ -301,13 +294,19 @@ class TranslationQueue {
       for (const batch of batches) totalUnits += batch.length;
       let translatedCount = 0;
       for (let i = 0; i < batches.length; i++) {
+        if (!chrome.runtime?.id) {
+          console.error("[DocBridge] 扩展上下文已失效，停止翻译队列");
+          this.onError?.(new Error("扩展上下文已失效，请刷新页面后重试"));
+          break;
+        }
         const batch = batches[i];
         try {
+          console.log(`[DocBridge] 发送翻译请求，批次 ${i + 1}/${batches.length}`);
           const cached = [];
           const uncached = [];
           for (const unit of batch) {
             const hash = await hashText(unit.originalText);
-            const cacheRsp = await chrome.runtime.sendMessage({
+            const cacheRsp = await this.sendMessage({
               type: "GET_CACHE",
               payload: { originalHash: hash }
             });
@@ -318,10 +317,7 @@ class TranslationQueue {
             }
           }
           if (uncached.length > 0) {
-            const translatePromise = new Promise((resolve) => {
-              this.pendingResolver = resolve;
-            });
-            await chrome.runtime.sendMessage({
+            const response = await this.sendMessage({
               type: "TRANSLATE",
               payload: {
                 units: uncached.map((u) => ({
@@ -333,9 +329,16 @@ class TranslationQueue {
                 targetLang: "zh-CN"
               }
             });
-            const translated = await translatePromise;
+            if (!response || !response.success) {
+              throw new Error(response?.error ?? "翻译失败");
+            }
+            const translated = response.data ?? [];
+            if (translated.length === 0) {
+              console.warn(`[DocBridge] 批次 ${i + 1}: API 返回 0 条翻译结果`);
+            } else {
+              console.log(`[DocBridge] 批次 ${i + 1} 收到翻译结果:`, translated.length, "条");
+            }
             cached.push(...translated);
-            this.pendingResolver = null;
           }
           for (const r of cached) {
             const original = batch.find((u) => u.id === r.id);
@@ -354,7 +357,12 @@ class TranslationQueue {
           }
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
-          console.error(`[DocBridge] 翻译批次 ${i} 失败:`, error.message);
+          if (error.message.includes("Extension context invalidated") || error.message.includes("扩展上下文已失效")) {
+            console.error(`[DocBridge] 翻译批次 ${i + 1} 失败 (上下文中止):`, error.message);
+            this.onError?.(error);
+            break;
+          }
+          console.error(`[DocBridge] 翻译批次 ${i + 1} 失败:`, error.message);
           this.onError?.(error);
         }
       }
@@ -363,20 +371,36 @@ class TranslationQueue {
       this.isRunning = false;
     }
   }
-  /** 销毁队列，移除监听 */
+  /** 销毁队列 */
   destroy() {
-    if (this.listenerRegistered) {
-      chrome.runtime.onMessage.removeListener(this.handleMessage);
-      this.listenerRegistered = false;
-    }
+    return;
   }
   /**
-   * 注册 chrome.runtime.onMessage 监听，接收 background 发来的 TRANSLATE_RESULT
+   * 发送消息给 Service Worker，带超时保护
+   * 超时或扩展上下文失效时抛出明确错误，避免 Promise 永久挂起
    */
-  registerListener() {
-    if (this.listenerRegistered) return;
-    chrome.runtime.onMessage.addListener(this.handleMessage);
-    this.listenerRegistered = true;
+  sendMessage(message) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const msg = `消息 ${message.type} 超时 (${MESSAGE_TIMEOUT_MS}ms)，Service Worker 可能未启动`;
+        console.error(`[DocBridge] ${msg}`);
+        reject(new Error(msg));
+      }, MESSAGE_TIMEOUT_MS);
+      chrome.runtime.sendMessage(message, (response) => {
+        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        if (chrome.runtime.lastError) {
+          console.error(`[DocBridge] ${message.type} 失败:`, chrome.runtime.lastError.message);
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(response);
+      });
+    });
   }
 }
 async function hashText(text) {
@@ -409,14 +433,20 @@ class DOMRenderer {
    * 渲染译文：在每个单元元素内部末尾插入 dt-bridge 节点
    */
   render(units) {
+    console.log("[DocBridge] DOMRenderer.render 收到", units.length, "个译文单元");
+    let skipped = 0;
+    let rendered = 0;
     for (const unit of units) {
       try {
-        this.renderOne(unit);
+        const result = this.renderOne(unit);
+        if (result === "skipped") skipped++;
+        else if (result === "rendered") rendered++;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(`[DocBridge] 渲染单元 ${unit.id} 失败:`, msg);
       }
     }
+    console.log(`[DocBridge] 渲染完成: ${rendered} 个已渲染, ${skipped} 个跳过`);
   }
   /**
    * 切换显示模式（通过 body class，不操作 DOM 元素）
@@ -448,16 +478,29 @@ class DOMRenderer {
   }
   // ---------- 私有方法 ----------
   /**
-   * 渲染单个译文单元
+   * 渲染单个译文单元，返回 'rendered' | 'skipped' 用于统计
    */
   renderOne(unit) {
-    if (!unit.originalUnit) return;
+    if (!unit.originalUnit) {
+      console.warn(`[DocBridge] 跳过 ${unit.id}: originalUnit 为 null (SW 无 DOM)`);
+      return "skipped";
+    }
     const el = unit.originalUnit.element;
-    if (!el || !document.contains(el)) return;
-    if (el.hasAttribute("data-dt-translated")) return;
+    if (!el) {
+      console.warn(`[DocBridge] 跳过 ${unit.id}: element 引用为空`);
+      return "skipped";
+    }
+    if (!document.contains(el)) {
+      console.warn(`[DocBridge] 跳过 ${unit.id}: 元素已脱离 DOM`);
+      return "skipped";
+    }
+    if (el.hasAttribute("data-dt-translated")) {
+      return "skipped";
+    }
     const wrapper = this.buildBridge(unit);
     el.appendChild(wrapper);
     el.setAttribute("data-dt-translated", "true");
+    return "rendered";
   }
   /**
    * 构建 dt-bridge 译文节点
@@ -549,6 +592,11 @@ async function translatePage() {
         console.log(`[DocBridge] 翻译进度: ${done}/${total}`);
       },
       onComplete: (results) => {
+        console.log(`[DocBridge] onComplete: ${results.length} 个结果 → 传入 renderer`);
+        if (results.length > 0) {
+          const sample = results[0];
+          console.log("[DocBridge] 首个结果:", sample.id, "译文:", sample.translatedText?.slice(0, 50), "originalUnit:", sample.originalUnit ? "存在" : "NULL");
+        }
         if (renderer) renderer.render(results);
         console.log(`[DocBridge] 翻译完成: ${results.length} 个单元已渲染`);
         isTranslating = false;
