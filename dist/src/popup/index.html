@@ -4,9 +4,47 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>DocBridge</title>
+  <script type="module" crossorigin src="/popup/index.js"></script>
   <link rel="stylesheet" crossorigin href="/popup/popup.css">
 </head>
 <body>
-  <div id="app">DocBridge</div>
+  <div id="app">
+    <h1 class="title">DocBridge</h1>
+
+    <!-- 状态指示 -->
+    <div id="status" class="status">
+      <span id="status-icon" class="status-icon"></span>
+      <span id="status-text">检测中...</span>
+    </div>
+
+    <!-- 操作按钮 -->
+    <div class="btn-group">
+      <button id="btn-translate" class="btn btn-primary">翻译页面</button>
+      <button id="btn-restore" class="btn btn-secondary">还原页面</button>
+    </div>
+
+    <!-- 显示模式 -->
+    <fieldset class="mode-group">
+      <legend>显示模式</legend>
+      <label class="radio-label">
+        <input type="radio" name="display-mode" value="bilingual" checked />
+        <span>双语对照</span>
+      </label>
+      <label class="radio-label">
+        <input type="radio" name="display-mode" value="translated-only" />
+        <span>仅译文</span>
+      </label>
+      <label class="radio-label">
+        <input type="radio" name="display-mode" value="original-only" />
+        <span>仅原文</span>
+      </label>
+    </fieldset>
+
+    <!-- 底部链接 -->
+    <div class="footer">
+      <a id="btn-options" href="#" title="打开设置页">打开设置页</a>
+    </div>
+  </div>
+
 </body>
 </html>
