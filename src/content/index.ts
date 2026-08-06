@@ -275,7 +275,9 @@ function injectFloatingBar(): void {
   bar.appendChild(createSep());
 
   bar.appendChild(createBtn('导出', () => {
-    renderer?.exportHTML();
+    safeAction(() => {
+      renderer?.exportHTML();
+    }, 300);
   }, '#722ed1', '#fff'));
 
   document.body.appendChild(bar);

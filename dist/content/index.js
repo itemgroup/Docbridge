@@ -884,7 +884,9 @@ function injectFloatingBar() {
   }, "#d9d9d9", "#333"));
   bar.appendChild(createSep());
   bar.appendChild(createBtn("导出", () => {
-    renderer?.exportHTML();
+    safeAction(() => {
+      renderer?.exportHTML();
+    }, 300);
   }, "#722ed1", "#fff"));
   document.body.appendChild(bar);
 }
