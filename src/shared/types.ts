@@ -63,7 +63,8 @@ export interface DTMessage {
     | 'GET_CACHE'
     | 'SET_CACHE'
     | 'TOGGLE_DISPLAY'
-    | 'START_TRANSLATE';
+    | 'START_TRANSLATE'
+    | 'EXPORT_HTML';
   payload: unknown;
 }
 

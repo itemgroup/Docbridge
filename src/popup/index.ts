@@ -11,6 +11,7 @@ const statusIcon = document.getElementById('status-icon') as HTMLElement;
 const statusText = document.getElementById('status-text') as HTMLElement;
 const btnTranslate = document.getElementById('btn-translate') as HTMLButtonElement;
 const btnRestore = document.getElementById('btn-restore') as HTMLButtonElement;
+const btnExport = document.getElementById('btn-export') as HTMLButtonElement;
 const btnOptions = document.getElementById('btn-options') as HTMLAnchorElement;
 const radioGroup = document.getElementsByName('display-mode') as NodeListOf<HTMLInputElement>;
 
@@ -65,6 +66,9 @@ function bindEvents(): void {
   });
   btnRestore.addEventListener('click', () => {
     void handleRestore();
+  });
+  btnExport.addEventListener('click', () => {
+    void handleExport();
   });
 
   radioGroup.forEach((radio) => {
@@ -124,6 +128,23 @@ async function handleRestore(): Promise<void> {
   );
   if (radio) radio.checked = true;
   setStatus('idle', '已还原');
+}
+
+/**
+ * 点击"导出译文"：通知 content script 导出 HTML
+ */
+async function handleExport(): Promise<void> {
+  if (!currentTabId || !isSupported) return;
+
+  const success = await sendToCurrentTab(currentTabId, {
+    type: 'EXPORT_HTML',
+    payload: {},
+  });
+  if (!success) {
+    console.warn('[DocBridge] 导出译文消息发送失败');
+    return;
+  }
+  setStatus('idle', '已导出');
 }
 
 /**

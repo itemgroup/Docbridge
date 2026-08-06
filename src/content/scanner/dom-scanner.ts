@@ -4,9 +4,9 @@ import type { TranslationUnit, UnitType } from '../../shared/types';
 
 /** 主内容区候选选择器（按优先级） */
 const MAIN_SELECTORS = [
-  'article', 'main', '[role="main"]', '.content', '.documentation',
-  '.markdown-body', '.post-content', '.article-content', '.entry-content',
-  '.main-content', '#main', '.docs', '.readme', '[class*="content"]', '[class*="main"]',
+  'article', 'main', '[role="main"]', '.content', '#content', '.main',
+  '.documentation', '.markdown-body', '.post-content', '.article-content', '.entry-content',
+  '.main-content', '#main', '.docs', '.readme',
 ];
 
 /** 排除区块的选择器（仅排除明确的导航/页脚/广告元素） */
@@ -96,6 +96,8 @@ export class DOMScanner {
    */
   private shouldSkip(el: HTMLElement): boolean {
     if (el.hasAttribute('data-dt-processed')) return true;
+    // 双重保险：如果元素内已有译文节点，说明已处理过
+    if (el.querySelector('.dt-bridge')) return true;
     if (SKIP_TAGS.has(el.tagName.toUpperCase())) return true;
     // 跳过不可见元素（display:none 或 visibility:hidden）
     if (!this.isVisible(el)) return true;

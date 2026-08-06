@@ -3,7 +3,10 @@
 import type { TranslationUnit, TranslatedUnit, DTMessage } from '../../shared/types';
 
 /** 批次间延迟（毫秒），避免触发限流 */
-const BATCH_DELAY_MS = 300;
+const BATCH_DELAY_MS = 100;
+
+/** 并发批次数（同时发送的翻译请求数） */
+const CONCURRENT_BATCHES = 3;
 
 /** sendMessage 超时时间（毫秒），超时视为 SW 不可达 */
 const MESSAGE_TIMEOUT_MS = 8000;
@@ -36,8 +39,8 @@ export class TranslationQueue {
   }
 
   /**
-   * 启动翻译：逐批次发送、等待结果、上报进度
-   * 检测到扩展上下文失效后立即中止，避免无效等待
+   * 启动翻译：并发发送 3 个批次，等待结果、上报进度
+   * 检测到扩展上下文失效后立即中止
    */
   async start(batches: TranslationUnit[][]): Promise<void> {
     if (this.isRunning) return;
@@ -49,100 +52,122 @@ export class TranslationQueue {
       for (const batch of batches) totalUnits += batch.length;
       let translatedCount = 0;
 
-      for (let i = 0; i < batches.length; i++) {
-        // 每批次开始前检查扩展上下文是否仍有效
+      // 并发窗口：每次处理 CONCURRENT_BATCHES 个批次
+      for (let i = 0; i < batches.length; i += CONCURRENT_BATCHES) {
         if (!chrome.runtime?.id) {
           console.error('[DocBridge] 扩展上下文已失效，停止翻译队列');
           this.onError?.(new Error('扩展上下文已失效，请刷新页面后重试'));
           break;
         }
 
-        const batch = batches[i];
-        try {
-          console.log(`[DocBridge] 发送翻译请求，批次 ${i + 1}/${batches.length}`);
+        const chunk = batches.slice(i, i + CONCURRENT_BATCHES);
+        const startIndex = i;
 
-          const cached: TranslateResultItem[] = [];
-          const uncached: TranslationUnit[] = [];
+        console.log(`[DocBridge] 并发翻译 批次 ${startIndex + 1}-${Math.min(startIndex + CONCURRENT_BATCHES, batches.length)}/${batches.length}`);
 
-          for (const unit of batch) {
-            const hash = await hashText(unit.originalText);
-            const cacheRsp = await this.sendMessage<{ translatedText?: string }>({
-              type: 'GET_CACHE',
-              payload: { originalHash: hash },
-            });
-            if (cacheRsp?.translatedText) {
-              cached.push({ id: unit.id, translatedText: cacheRsp.translatedText });
-            } else {
-              uncached.push(unit);
+        // 并发处理当前窗口内的批次
+        const chunkResults = await Promise.allSettled(
+          chunk.map((batch, j) => this.processBatch(batch, startIndex + j))
+        );
+
+        // 收集结果
+        for (const result of chunkResults) {
+          if (result.status === 'fulfilled') {
+            for (const r of result.value) {
+              const original = batches.flat().find((u) => u.id === r.id);
+              if (original) {
+                allResults.push({
+                  id: r.id,
+                  translatedText: r.translatedText,
+                  originalUnit: original,
+                });
+              }
             }
+            translatedCount += result.value.length;
           }
+        }
 
-          if (uncached.length > 0) {
-            const response = await this.sendMessage<{
-              success: boolean;
-              data?: TranslateResultItem[];
-              error?: string;
-            }>({
-              type: 'TRANSLATE',
-              payload: {
-                units: uncached.map((u) => ({
-                  id: u.id,
-                  text: u.originalText,
-                  contextChain: u.contextChain,
-                })),
-                glossary: {},
-                targetLang: 'zh-CN',
-              },
-            });
+        this.onProgress(translatedCount, totalUnits);
 
-            if (!response || !response.success) {
-              throw new Error(response?.error ?? '翻译失败');
-            }
-
-            const translated = response.data ?? [];
-            if (translated.length === 0) {
-              console.warn(`[DocBridge] 批次 ${i + 1}: API 返回 0 条翻译结果`);
-            } else {
-              console.log(`[DocBridge] 批次 ${i + 1} 收到翻译结果:`, translated.length, '条');
-            }
-            cached.push(...translated);
-          }
-
-          for (const r of cached) {
-            const original = batch.find((u) => u.id === r.id);
-            if (original) {
-              allResults.push({
-                id: r.id,
-                translatedText: r.translatedText,
-                originalUnit: original,
-              });
-            }
-          }
-
-          translatedCount += cached.length;
-          this.onProgress(translatedCount, totalUnits);
-
-          if (i < batches.length - 1) {
-            await sleep(BATCH_DELAY_MS);
-          }
-        } catch (err: unknown) {
-          const error = err instanceof Error ? err : new Error(String(err));
-          // 扩展上下文失效 → 立即中止，不再尝试剩余批次
-          if (error.message.includes('Extension context invalidated')
-              || error.message.includes('扩展上下文已失效')) {
-            console.error(`[DocBridge] 翻译批次 ${i + 1} 失败 (上下文中止):`, error.message);
-            this.onError?.(error);
-            break;
-          }
-          console.error(`[DocBridge] 翻译批次 ${i + 1} 失败:`, error.message);
-          this.onError?.(error);
-          // 其他错误继续下一批次
+        // 批次间短暂延迟，避免 API 限流
+        if (i + CONCURRENT_BATCHES < batches.length) {
+          await sleep(BATCH_DELAY_MS);
         }
       }
 
       this.onComplete(allResults);
     } finally {
       this.isRunning = false;
+    }
+  }
+
+  /**
+   * 处理单个批次的翻译流程
+   */
+  private async processBatch(
+    batch: TranslationUnit[],
+    batchIndex: number
+  ): Promise<TranslateResultItem[]> {
+    try {
+      const cached: TranslateResultItem[] = [];
+      const uncached: TranslationUnit[] = [];
+
+      for (const unit of batch) {
+        const hash = await hashText(unit.originalText);
+        const cacheRsp = await this.sendMessage<{ translatedText?: string }>({
+          type: 'GET_CACHE',
+          payload: { originalHash: hash },
+        });
+        if (cacheRsp?.translatedText) {
+          cached.push({ id: unit.id, translatedText: cacheRsp.translatedText });
+        } else {
+          uncached.push(unit);
+        }
+      }
+
+      if (uncached.length > 0) {
+        const response = await this.sendMessage<{
+          success: boolean;
+          data?: TranslateResultItem[];
+          error?: string;
+        }>({
+          type: 'TRANSLATE',
+          payload: {
+            units: uncached.map((u) => ({
+              id: u.id,
+              text: u.originalText,
+              contextChain: u.contextChain,
+            })),
+            glossary: {},
+            targetLang: 'zh-CN',
+          },
+        });
+
+        if (!response || !response.success) {
+          throw new Error(response?.error ?? '翻译失败');
+        }
+
+        const translated = response.data ?? [];
+        if (translated.length === 0) {
+          console.warn(`[DocBridge] 批次 ${batchIndex + 1}: API 返回 0 条翻译结果`);
+        } else {
+          console.log(`[DocBridge] 批次 ${batchIndex + 1} 收到翻译结果:`, translated.length, '条');
+        }
+        cached.push(...translated);
+      }
+
+      return cached;
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (error.message.includes('Extension context invalidated')
+          || error.message.includes('扩展上下文已失效')) {
+        console.error(`[DocBridge] 翻译批次 ${batchIndex + 1} 失败 (上下文中止):`, error.message);
+        this.onError?.(error);
+        return [];
+      }
+      console.error(`[DocBridge] 翻译批次 ${batchIndex + 1} 失败:`, error.message);
+      this.onError?.(error);
+      return [];
     }
   }
 

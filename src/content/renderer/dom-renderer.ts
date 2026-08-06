@@ -1,4 +1,4 @@
-// src/content/renderer/dom-renderer.ts — 译文渲染引擎：零侵入插入 + 显示模式切换 | DocBridge | 2025-08-06
+// src/content/renderer/dom-renderer.ts — 译文渲染引擎：零侵入插入 + 显示模式切换 + 导出 | DocBridge | 2025-08-06
 
 import type { TranslatedUnit, DisplayMode } from '../../shared/types';
 
@@ -27,7 +27,7 @@ export class DOMRenderer {
   }
 
   /**
-   * 渲染译文：在每个单元元素内部末尾插入 dt-bridge 节点
+   * 渲染译文：在每个单元元素内部插入 dt-bridge 节点（作为第一个子节点）
    */
   render(units: TranslatedUnit[]): void {
     console.log('[DocBridge] DOMRenderer.render 收到', units.length, '个译文单元');
@@ -47,14 +47,12 @@ export class DOMRenderer {
   }
 
   /**
-   * 切换显示模式（通过 body class，不操作 DOM 元素）
+   * 切换显示模式（通过 body class + CSS，不重新操作 DOM）
    */
   setMode(mode: DisplayMode): void {
-    // 移除旧模式 class
     for (const cls of Object.values(MODE_CLASS_MAP)) {
       document.body.classList.remove(cls);
     }
-    // 设置新模式
     document.body.classList.add(MODE_CLASS_MAP[mode]);
     this.currentMode = mode;
   }
@@ -67,45 +65,77 @@ export class DOMRenderer {
   }
 
   /**
-   * 清除所有译文节点和标记（包括 scanner 的 data-dt-processed，确保可重新翻译）
+   * 清除所有译文节点和标记（确保可重新翻译）
    */
   clear(): void {
-    // 1. 移除所有 .dt-bridge 节点
+    // 1. 移除所有译文节点
     document.querySelectorAll(`.${DT_BRIDGE_CLASS}`).forEach((el) => el.remove());
-    // 2. 移除所有 data-dt-translated 标记
-    document.querySelectorAll('[data-dt-translated]').forEach((el) => {
+    // 2. 清除所有标记属性
+    document.querySelectorAll('[data-dt-processed], [data-dt-translated]').forEach((el) => {
+      el.removeAttribute('data-dt-processed');
       el.removeAttribute('data-dt-translated');
     });
-    // 3. 移除所有 data-dt-processed 标记（关键！否则 scanner 会跳过）
-    document.querySelectorAll('[data-dt-processed]').forEach((el) => {
-      el.removeAttribute('data-dt-processed');
-    });
-    // 4. 隐藏 tooltip（如果存在）
-    const tooltip = document.getElementById('dt-tooltip');
-    if (tooltip) tooltip.style.display = 'none';
-    // 5. 重置模式
+    // 3. 清除 body 上的模式 class
     for (const cls of Object.values(MODE_CLASS_MAP)) {
       document.body.classList.remove(cls);
+    }
+  }
+
+  /**
+   * 导出译文页面为 HTML 文件
+   * 克隆当前 DOM，移除内部属性，保留译文文本，触发下载
+   */
+  exportHTML(): void {
+    try {
+      const clone = document.documentElement.cloneNode(true) as HTMLElement;
+
+      // 移除所有扩展内部属性，保留译文文本
+      clone.querySelectorAll('.dt-bridge').forEach((el) => {
+        el.removeAttribute('data-dt-id');
+        el.removeAttribute('title');
+      });
+      clone.querySelectorAll('[data-dt-processed], [data-dt-translated]').forEach((el) => {
+        el.removeAttribute('data-dt-processed');
+        el.removeAttribute('data-dt-translated');
+      });
+      // 移除控制栏
+      const bar = clone.querySelector('#docbridge-floating-bar');
+      if (bar) bar.remove();
+      // 移除注入的样式
+      const style = clone.querySelector(`#${STYLE_ID}`);
+      if (style) style.remove();
+
+      const html = '<!DOCTYPE html>\n' + clone.outerHTML;
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'translated-page.html';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      console.log('[DocBridge] 页面已导出为 translated-page.html');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[DocBridge] 导出失败:', msg);
     }
   }
 
   // ---------- 私有方法 ----------
 
   /**
-   * 渲染单个译文单元，返回 'rendered' | 'skipped' 用于统计
+   * 渲染单个译文单元
+   * 将 bridge 插入为第一个子节点（便于仅译文模式 absolute 覆盖）
    */
   private renderOne(unit: TranslatedUnit): 'rendered' | 'skipped' {
     if (!unit.originalUnit) {
-      console.warn(`[DocBridge] 跳过 ${unit.id}: originalUnit 为 null (SW 无 DOM)`);
       return 'skipped';
     }
     const el = unit.originalUnit.element;
-    if (!el) {
-      console.warn(`[DocBridge] 跳过 ${unit.id}: element 引用为空`);
-      return 'skipped';
-    }
-    if (!document.contains(el)) {
-      console.warn(`[DocBridge] 跳过 ${unit.id}: 元素已脱离 DOM`);
+    if (!el || !document.contains(el)) {
       return 'skipped';
     }
     if (el.hasAttribute('data-dt-translated')) {
@@ -113,18 +143,26 @@ export class DOMRenderer {
     }
 
     const wrapper = this.buildBridge(unit);
-    el.appendChild(wrapper);
+
+    // 插入为第一个子节点（仅译文模式用 absolute 覆盖时更自然）
+    if (el.firstChild) {
+      el.insertBefore(wrapper, el.firstChild);
+    } else {
+      el.appendChild(wrapper);
+    }
     el.setAttribute('data-dt-translated', 'true');
     return 'rendered';
   }
 
   /**
-   * 构建 dt-bridge 译文节点（含 tooltip 事件 + 自动换行样式）
+   * 构建 dt-bridge 译文节点（原生 title + 自动换行）
    */
   private buildBridge(unit: TranslatedUnit): HTMLSpanElement {
     const wrapper = document.createElement('span');
     wrapper.className = DT_BRIDGE_CLASS;
     wrapper.setAttribute(DT_ID_ATTR, unit.id);
+    // 浏览器原生 tooltip 显示完整译文
+    wrapper.title = unit.translatedText;
     wrapper.style.cssText = [
       'display:block',
       'margin-top:4px',
@@ -138,20 +176,26 @@ export class DOMRenderer {
       'z-index:1',
     ].join(';');
 
-    // 代码块用等宽字体
     if (unit.originalUnit?.type === 'code_block') {
       wrapper.style.fontFamily = 'monospace';
       wrapper.style.backgroundColor = '#f6f8fa';
       wrapper.style.borderRadius = '4px';
     }
 
-    // dt-label：[译] 标签
+    // 从父元素复制字体样式（仅译文模式覆盖时字体一致）
+    if (unit.originalUnit?.element) {
+      const parentStyle = window.getComputedStyle(unit.originalUnit.element);
+      wrapper.style.fontSize = parentStyle.fontSize;
+      wrapper.style.fontFamily = parentStyle.fontFamily;
+      wrapper.style.lineHeight = parentStyle.lineHeight;
+      wrapper.style.fontWeight = parentStyle.fontWeight;
+    }
+
     const label = document.createElement('span');
     label.className = DT_LABEL_CLASS;
     label.style.cssText = 'color:#999;font-size:0.85em;margin-right:4px;';
     label.textContent = '[译]';
 
-    // dt-text：译文正文
     const text = document.createElement('span');
     text.className = DT_TEXT_CLASS;
     text.style.cssText = 'color:#333;';
@@ -159,102 +203,49 @@ export class DOMRenderer {
 
     wrapper.appendChild(label);
     wrapper.appendChild(text);
-
-    // 绑定 tooltip 事件
-    this.bindTooltip(wrapper, unit.translatedText);
-
     return wrapper;
   }
 
   /**
-   * 绑定 tooltip：mouseenter 显示完整译文，mouseleave 隐藏
-   */
-  private bindTooltip(el: HTMLElement, fullText: string): void {
-    el.addEventListener('mouseenter', (e: MouseEvent) => {
-      const tooltip = this.ensureTooltip();
-      tooltip.textContent = fullText;
-      tooltip.style.display = 'block';
-      this.positionTooltip(tooltip, e);
-    });
-    el.addEventListener('mousemove', (e: MouseEvent) => {
-      const tooltip = document.getElementById('dt-tooltip');
-      if (tooltip && tooltip.style.display !== 'none') {
-        this.positionTooltip(tooltip, e);
-      }
-    });
-    el.addEventListener('mouseleave', () => {
-      const tooltip = document.getElementById('dt-tooltip');
-      if (tooltip) tooltip.style.display = 'none';
-    });
-  }
-
-  /**
-   * 确保全局 tooltip 元素存在
-   */
-  private ensureTooltip(): HTMLElement {
-    const existing = document.getElementById('dt-tooltip');
-    if (existing) return existing;
-    const tooltip = document.createElement('div');
-    tooltip.id = 'dt-tooltip';
-    tooltip.style.cssText = [
-      'position:fixed',
-      'display:none',
-      'background:rgba(0,0,0,0.9)',
-      'color:#fff',
-      'padding:8px 12px',
-      'border-radius:4px',
-      'font-size:13px',
-      'max-width:400px',
-      'z-index:99999',
-      'line-height:1.5',
-      'pointer-events:none',
-      'white-space:normal',
-      'word-break:break-word',
-    ].join(';');
-    document.body.appendChild(tooltip);
-    return tooltip;
-  }
-
-  /**
-   * 定位 tooltip 到鼠标上方 8px
-   */
-  private positionTooltip(tooltip: HTMLElement, e: MouseEvent): void {
-    const offsetX = 12;
-    const offsetY = 8;
-    let left = e.clientX + offsetX;
-    let top = e.clientY - tooltip.offsetHeight - offsetY;
-
-    // 边界修正：不超出视口
-    if (left + tooltip.offsetWidth > window.innerWidth - 8) {
-      left = window.innerWidth - tooltip.offsetWidth - 8;
-    }
-    if (top < 8) {
-      top = e.clientY + offsetY; // 显示在鼠标下方
-    }
-    if (left < 8) left = 8;
-
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
-  }
-
-  /**
    * 注入显示模式控制的 CSS 样式
+   * 仅译文模式：原文 visibility:hidden，译文 absolute 覆盖
    */
   private injectStyles(): void {
     if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement('style');
     style.id = STYLE_ID;
     style.textContent = `
+      /* 双语模式：译文正常流 */
+      .dt-mode-bilingual .${DT_BRIDGE_CLASS} {
+        position: relative !important;
+        display: block !important;
+      }
+
+      /* 仅译文模式：原文隐藏占位，译文 absolute 覆盖 */
       .dt-mode-translated-only [data-dt-translated] {
-        opacity: 0.15;
-        transition: opacity 0.2s ease;
+        visibility: hidden;
+        position: relative;
       }
-      .dt-mode-translated-only [data-dt-translated]:hover {
-        opacity: 1;
+      .dt-mode-translated-only [data-dt-translated] > .${DT_BRIDGE_CLASS} {
+        visibility: visible;
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        background: transparent;
+        color: inherit;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        white-space: normal;
+        word-break: break-word;
       }
-      .dt-mode-translated-only .${DT_BRIDGE_CLASS} {
-        opacity: 1 !important;
-      }
+
+      /* 仅原文模式：隐藏译文 */
       .dt-mode-original-only .${DT_BRIDGE_CLASS} {
         display: none !important;
       }

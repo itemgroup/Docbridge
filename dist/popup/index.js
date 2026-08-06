@@ -3,6 +3,7 @@ const statusIcon = document.getElementById("status-icon");
 const statusText = document.getElementById("status-text");
 const btnTranslate = document.getElementById("btn-translate");
 const btnRestore = document.getElementById("btn-restore");
+const btnExport = document.getElementById("btn-export");
 const btnOptions = document.getElementById("btn-options");
 const radioGroup = document.getElementsByName("display-mode");
 let currentTabId = null;
@@ -43,6 +44,9 @@ function bindEvents() {
   btnRestore.addEventListener("click", () => {
     void handleRestore();
   });
+  btnExport.addEventListener("click", () => {
+    void handleExport();
+  });
   radioGroup.forEach((radio) => {
     radio.addEventListener("change", (e) => {
       void handleModeChange(e);
@@ -82,6 +86,18 @@ async function handleRestore() {
   );
   if (radio) radio.checked = true;
   setStatus("idle", "已还原");
+}
+async function handleExport() {
+  if (!currentTabId || !isSupported) return;
+  const success = await sendToCurrentTab(currentTabId, {
+    type: "EXPORT_HTML",
+    payload: {}
+  });
+  if (!success) {
+    console.warn("[DocBridge] 导出译文消息发送失败");
+    return;
+  }
+  setStatus("idle", "已导出");
 }
 async function handleModeChange(e) {
   if (!currentTabId || !isSupported) return;

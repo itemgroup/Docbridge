@@ -102,9 +102,30 @@ async function translatePage(): Promise<void> {
 
 /**
  * 使用 MutationObserver 检测 URL 变化或大量 DOM 新增
+ * 过滤译文相关节点变更，防止自身触发的 DOM 变更导致死循环
  */
 function setupMutationObserver(): void {
-  observer = new MutationObserver(() => {
+  observer = new MutationObserver((mutations) => {
+    // 过滤：如果所有 addedNodes 都是译文相关节点，忽略
+    let allBridgeRelated = true;
+    for (const mutation of mutations) {
+      for (let i = 0; i < mutation.addedNodes.length; i++) {
+        const node = mutation.addedNodes[i];
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+          allBridgeRelated = false;
+          break;
+        }
+        const el = node as Element;
+        if (!el.classList.contains('dt-bridge') && !el.closest('.dt-bridge')
+            && !el.hasAttribute('data-dt-translated') && !el.hasAttribute('data-dt-id')) {
+          allBridgeRelated = false;
+          break;
+        }
+      }
+      if (!allBridgeRelated) break;
+    }
+    if (allBridgeRelated) return;
+
     // 防抖 1000ms
     if (translateTimer) clearTimeout(translateTimer);
     translateTimer = setTimeout(() => {
@@ -165,6 +186,15 @@ function setupMessageListener(): void {
           sendResponse({ success: true });
           break;
         }
+        case 'EXPORT_HTML': {
+          if (renderer) {
+            renderer.exportHTML();
+            sendResponse({ success: true });
+          } else {
+            sendResponse({ success: false, error: '渲染器未初始化' });
+          }
+          break;
+        }
         default:
           break;
       }
@@ -217,6 +247,13 @@ function injectFloatingBar(): void {
   bar.appendChild(createBtn('双语', () => renderer?.setMode('bilingual'), '#52c41a', '#fff'));
   bar.appendChild(createBtn('仅译文', () => renderer?.setMode('translated-only'), '#faad14', '#fff'));
   bar.appendChild(createBtn('仅原文', () => renderer?.setMode('original-only'), '#d9d9d9', '#333'));
+  // 分隔线
+  const sep2 = document.createElement('span');
+  sep2.style.cssText = 'color:#d9d9d9;line-height:28px;';
+  sep2.textContent = '|';
+  bar.appendChild(sep2);
+  // 导出按钮
+  bar.appendChild(createBtn('导出', () => renderer?.exportHTML(), '#722ed1', '#fff'));
 
   document.body.appendChild(bar);
 }

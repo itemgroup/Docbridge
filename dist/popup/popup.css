@@ -116,6 +116,16 @@ body {
   background: var(--color-border);
 }
 
+.btn-outline {
+  background: transparent;
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary);
+}
+
+.btn-outline:hover:not(:disabled) {
+  background: rgba(24, 144, 255, 0.08);
+}
+
 /* ---------- 模式选择 ---------- */
 .mode-group {
   border: 1px solid var(--color-border);
