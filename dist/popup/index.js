@@ -37,52 +37,81 @@ async function detectCurrentTab() {
   }
 }
 function bindEvents() {
-  btnTranslate.addEventListener("click", handleTranslate);
-  btnRestore.addEventListener("click", handleRestore);
+  btnTranslate.addEventListener("click", () => {
+    void handleTranslate();
+  });
+  btnRestore.addEventListener("click", () => {
+    void handleRestore();
+  });
   radioGroup.forEach((radio) => {
-    radio.addEventListener("change", handleModeChange);
+    radio.addEventListener("change", (e) => {
+      void handleModeChange(e);
+    });
   });
   btnOptions.addEventListener("click", (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
   });
 }
-function handleTranslate() {
+async function handleTranslate() {
   if (!currentTabId || !isSupported) return;
   setStatus("running", "翻译中...");
   btnTranslate.disabled = true;
-  chrome.tabs.sendMessage(currentTabId, {
+  const success = await sendToCurrentTab(currentTabId, {
     type: "START_TRANSLATE",
     payload: {}
-  }).catch(() => {
+  });
+  if (!success) {
     setStatus("idle", "翻译启动失败");
     btnTranslate.disabled = false;
-  });
+    return;
+  }
 }
-function handleRestore() {
+async function handleRestore() {
   if (!currentTabId || !isSupported) return;
-  chrome.tabs.sendMessage(currentTabId, {
+  const success = await sendToCurrentTab(currentTabId, {
     type: "TOGGLE_DISPLAY",
     payload: { mode: "original-only" }
-  }).catch((err) => {
-    console.warn("[DocBridge] 还原页面消息发送失败:", err);
   });
+  if (!success) {
+    console.warn("[DocBridge] 还原页面消息发送失败");
+    return;
+  }
   const radio = document.querySelector(
     'input[name="display-mode"][value="original-only"]'
   );
   if (radio) radio.checked = true;
   setStatus("idle", "已还原");
 }
-function handleModeChange(e) {
+async function handleModeChange(e) {
   if (!currentTabId || !isSupported) return;
   const target = e.target;
   const mode = target.value;
-  chrome.tabs.sendMessage(currentTabId, {
+  const success = await sendToCurrentTab(currentTabId, {
     type: "TOGGLE_DISPLAY",
     payload: { mode }
-  }).catch((err) => {
-    console.warn("[DocBridge] 模式切换消息发送失败:", err);
   });
+  if (!success) {
+    console.warn("[DocBridge] 模式切换消息发送失败");
+  }
+}
+async function sendToCurrentTab(tabId, message) {
+  try {
+    await chrome.tabs.sendMessage(tabId, message);
+    return true;
+  } catch {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["dist/content/index.js"]
+      });
+      await chrome.tabs.sendMessage(tabId, message);
+      return true;
+    } catch (err) {
+      console.warn("[DocBridge] 发送消息失败，自动注入 content script 也未成功:", err);
+      return false;
+    }
+  }
 }
 function setStatus(type, text) {
   statusIcon.className = "status-icon";

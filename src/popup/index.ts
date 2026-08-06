@@ -60,11 +60,17 @@ async function detectCurrentTab(): Promise<void> {
 // ---------- 事件绑定 ----------
 
 function bindEvents(): void {
-  btnTranslate.addEventListener('click', handleTranslate);
-  btnRestore.addEventListener('click', handleRestore);
+  btnTranslate.addEventListener('click', () => {
+    void handleTranslate();
+  });
+  btnRestore.addEventListener('click', () => {
+    void handleRestore();
+  });
 
   radioGroup.forEach((radio) => {
-    radio.addEventListener('change', handleModeChange);
+    radio.addEventListener('change', (e) => {
+      void handleModeChange(e);
+    });
   });
 
   btnOptions.addEventListener('click', (e) => {
@@ -78,20 +84,21 @@ function bindEvents(): void {
 /**
  * 点击"翻译页面"
  */
-function handleTranslate(): void {
+async function handleTranslate(): Promise<void> {
   if (!currentTabId || !isSupported) return;
 
   setStatus('running', '翻译中...');
   btnTranslate.disabled = true;
 
-  chrome.tabs.sendMessage(currentTabId, {
+  const success = await sendToCurrentTab(currentTabId, {
     type: 'START_TRANSLATE',
     payload: {},
-  } satisfies DTMessage).catch(() => {
-    // content script 可能尚未注入
+  });
+  if (!success) {
     setStatus('idle', '翻译启动失败');
     btnTranslate.disabled = false;
-  });
+    return;
+  }
 
   // popup 关闭后 content script 仍在运行，状态在下次打开时刷新
 }
@@ -99,15 +106,17 @@ function handleTranslate(): void {
 /**
  * 点击"还原页面"：切换到仅原文模式
  */
-function handleRestore(): void {
+async function handleRestore(): Promise<void> {
   if (!currentTabId || !isSupported) return;
 
-  chrome.tabs.sendMessage(currentTabId, {
+  const success = await sendToCurrentTab(currentTabId, {
     type: 'TOGGLE_DISPLAY',
     payload: { mode: 'original-only' },
-  } satisfies DTMessage).catch((err: unknown) => {
-    console.warn('[DocBridge] 还原页面消息发送失败:', err);
   });
+  if (!success) {
+    console.warn('[DocBridge] 还原页面消息发送失败');
+    return;
+  }
 
   // 同步 radio 选中
   const radio = document.querySelector<HTMLInputElement>(
@@ -120,21 +129,42 @@ function handleRestore(): void {
 /**
  * 显示模式切换
  */
-function handleModeChange(e: Event): void {
+async function handleModeChange(e: Event): Promise<void> {
   if (!currentTabId || !isSupported) return;
 
   const target = e.target as HTMLInputElement;
   const mode = target.value as DisplayMode;
 
-  chrome.tabs.sendMessage(currentTabId, {
+  const success = await sendToCurrentTab(currentTabId, {
     type: 'TOGGLE_DISPLAY',
     payload: { mode },
-  } satisfies DTMessage).catch((err: unknown) => {
-    console.warn('[DocBridge] 模式切换消息发送失败:', err);
   });
+  if (!success) {
+    console.warn('[DocBridge] 模式切换消息发送失败');
+  }
 }
 
 // ---------- UI 辅助 ----------
+
+async function sendToCurrentTab(tabId: number, message: DTMessage): Promise<boolean> {
+  try {
+    await chrome.tabs.sendMessage(tabId, message);
+    return true;
+  } catch {
+    try {
+      // 扩展重载后，已打开页面通常还没重新注入 content script，这里补注入一次再重试
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['dist/content/index.js'],
+      });
+      await chrome.tabs.sendMessage(tabId, message);
+      return true;
+    } catch (err: unknown) {
+      console.warn('[DocBridge] 发送消息失败，自动注入 content script 也未成功:', err);
+      return false;
+    }
+  }
+}
 
 type StatusType = 'idle' | 'running' | 'disabled';
 
