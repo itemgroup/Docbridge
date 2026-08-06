@@ -4,9 +4,83 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>DocBridge 设置</title>
+  <script type="module" crossorigin src="/options/index.js"></script>
   <link rel="stylesheet" crossorigin href="/options/options.css">
 </head>
 <body>
-  <div id="app">DocBridge 设置</div>
+  <div id="app">
+    <h1 class="page-title">DocBridge 设置</h1>
+
+    <!-- API 设置 -->
+    <section class="card">
+      <h2 class="section-title">API 设置</h2>
+      <div class="form-row">
+        <label class="form-label" for="api-key">DeepSeek API Key</label>
+        <div class="input-group">
+          <input type="password" id="api-key" class="form-input" placeholder="sk-..." autocomplete="off" />
+          <button type="button" id="btn-toggle-key" class="btn btn-sm btn-secondary" title="显示/隐藏">显示</button>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" id="btn-save-apikey" class="btn btn-primary">保存</button>
+      </div>
+    </section>
+
+    <!-- 术语表 -->
+    <section class="card">
+      <h2 class="section-title">自定义术语表</h2>
+      <p class="section-desc">遇到以下词汇时将按指定方式翻译，其他情况保留原样。</p>
+      <table id="glossary-table" class="glossary-table">
+        <thead>
+          <tr>
+            <th>英文术语</th>
+            <th>中文翻译</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="glossary-tbody">
+          <tr class="empty-row">
+            <td colspan="3">暂无术语</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="add-glossary">
+        <input type="text" id="term-en" class="form-input" placeholder="英文术语" />
+        <input type="text" id="term-zh" class="form-input" placeholder="中文翻译" />
+        <button type="button" id="btn-add-glossary" class="btn btn-primary">添加</button>
+      </div>
+    </section>
+
+    <!-- 显示设置 -->
+    <section class="card">
+      <h2 class="section-title">显示设置</h2>
+      <div class="form-row">
+        <label class="form-label" for="display-mode">默认显示模式</label>
+        <select id="display-mode" class="form-select">
+          <option value="bilingual">双语对照</option>
+          <option value="translated-only">仅译文</option>
+          <option value="original-only">仅原文</option>
+        </select>
+      </div>
+    </section>
+
+    <!-- 网站过滤 -->
+    <section class="card">
+      <h2 class="section-title">网站过滤</h2>
+      <div class="form-row">
+        <label class="form-label" for="blacklist">黑名单（不翻译的网站）</label>
+        <p class="section-desc">每行一个域名，如 github.com</p>
+        <textarea id="blacklist" class="form-textarea" rows="4" placeholder="github.com&#10;youtube.com"></textarea>
+      </div>
+      <div class="form-row">
+        <label class="form-label" for="whitelist">白名单（仅翻译的网站，留空则全部翻译）</label>
+        <textarea id="whitelist" class="form-textarea" rows="4" placeholder="developer.mozilla.org&#10;react.dev"></textarea>
+      </div>
+    </section>
+
+    <!-- 保存提示 -->
+    <div id="toast" class="toast hidden">保存成功</div>
+  </div>
+
 </body>
 </html>
