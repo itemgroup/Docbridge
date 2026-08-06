@@ -7,10 +7,15 @@ const MAIN_SELECTORS = [
   ".markdown-body",
   ".post-content",
   ".article-content",
-  ".entry-content"
+  ".entry-content",
+  ".main-content",
+  "#main",
+  ".docs",
+  ".readme",
+  '[class*="content"]',
+  '[class*="main"]'
 ];
-const EXCLUDE_KEYWORDS = ["nav", "footer", "sidebar", "ad-", "cookie", "comment"];
-const INLINE_TAGS = /* @__PURE__ */ new Set(["A", "CODE", "STRONG", "EM", "SPAN", "B", "I", "U", "SMALL", "MARK", "SUB", "SUP"]);
+const EXCLUDE_KEYWORDS = ["ad-", "advertisement", "cookie-banner", "comment-section", "social-share"];
 const SKIP_TAGS = /* @__PURE__ */ new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "INPUT", "TEXTAREA", "SELECT", "BUTTON", "BR", "HR"]);
 const MIN_TEXT_LENGTH = 3;
 class DOMScanner {
@@ -67,13 +72,23 @@ class DOMScanner {
   shouldSkip(el) {
     if (el.hasAttribute("data-dt-processed")) return true;
     if (SKIP_TAGS.has(el.tagName.toUpperCase())) return true;
+    if (!this.isVisible(el)) return true;
     const classAndId = (el.className + " " + el.id).toLowerCase();
     if (EXCLUDE_KEYWORDS.some((kw) => classAndId.includes(kw))) return true;
     return false;
   }
   /**
+   * 检查元素是否可见
+   */
+  isVisible(el) {
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (parseFloat(style.opacity) === 0) return false;
+    return true;
+  }
+  /**
    * 根据标签和 DOM 位置判断翻译单元类型
-   * 行内元素返回 null（不作为独立单元）
+   * 扩大扫描范围：span(a), section, blockquote, dd, dt 等
    */
   getElementType(tag, el) {
     switch (tag) {
@@ -93,6 +108,31 @@ class DOMScanner {
         return "table_cell";
       case "FIGCAPTION":
         return "caption";
+      case "SECTION":
+        return "paragraph";
+      case "BLOCKQUOTE":
+        return "paragraph";
+      case "DD":
+      case "DT":
+        return "list_item";
+      case "A": {
+        if (el.closest("nav")) return null;
+        const href = el.getAttribute("href") ?? "";
+        if (href.startsWith("#") && href.length <= 10) return null;
+        const text = this.extractText(el);
+        if (text.length > 10) return "paragraph";
+        return null;
+      }
+      case "SPAN": {
+        const parent = el.parentElement;
+        if (parent) {
+          const pTag = parent.tagName.toUpperCase();
+          if (pTag === "P" || pTag === "DIV" || pTag === "LI" || pTag === "TD" || pTag === "TH") return null;
+        }
+        const text = this.extractText(el);
+        if (text.length > 30) return "paragraph";
+        return null;
+      }
       default: {
         if (tag === "PRE") {
           const codeChild = el.querySelector("code");
@@ -104,7 +144,6 @@ class DOMScanner {
         if (el.classList.contains("caption")) {
           return "caption";
         }
-        if (INLINE_TAGS.has(tag)) return null;
         return null;
       }
     }
@@ -465,13 +504,18 @@ class DOMRenderer {
     return this.currentMode;
   }
   /**
-   * 清除所有译文节点和标记
+   * 清除所有译文节点和标记（包括 scanner 的 data-dt-processed，确保可重新翻译）
    */
   clear() {
-    const bridges = document.querySelectorAll(`.${DT_BRIDGE_CLASS}`);
-    bridges.forEach((el) => el.remove());
-    const translated = document.querySelectorAll(`[data-dt-translated]`);
-    translated.forEach((el) => el.removeAttribute("data-dt-translated"));
+    document.querySelectorAll(`.${DT_BRIDGE_CLASS}`).forEach((el) => el.remove());
+    document.querySelectorAll("[data-dt-translated]").forEach((el) => {
+      el.removeAttribute("data-dt-translated");
+    });
+    document.querySelectorAll("[data-dt-processed]").forEach((el) => {
+      el.removeAttribute("data-dt-processed");
+    });
+    const tooltip = document.getElementById("dt-tooltip");
+    if (tooltip) tooltip.style.display = "none";
     for (const cls of Object.values(MODE_CLASS_MAP)) {
       document.body.classList.remove(cls);
     }
@@ -503,13 +547,24 @@ class DOMRenderer {
     return "rendered";
   }
   /**
-   * 构建 dt-bridge 译文节点
+   * 构建 dt-bridge 译文节点（含 tooltip 事件 + 自动换行样式）
    */
   buildBridge(unit) {
     const wrapper = document.createElement("span");
     wrapper.className = DT_BRIDGE_CLASS;
     wrapper.setAttribute(DT_ID_ATTR, unit.id);
-    wrapper.style.cssText = "display:block;margin-top:4px;padding:4px 0;border-left:3px solid #1890ff;padding-left:8px;";
+    wrapper.style.cssText = [
+      "display:block",
+      "margin-top:4px",
+      "padding:4px 0",
+      "border-left:3px solid #1890ff",
+      "padding-left:8px",
+      "white-space:normal",
+      "word-break:break-word",
+      "overflow-wrap:break-word",
+      "position:relative",
+      "z-index:1"
+    ].join(";");
     if (unit.originalUnit?.type === "code_block") {
       wrapper.style.fontFamily = "monospace";
       wrapper.style.backgroundColor = "#f6f8fa";
@@ -525,7 +580,73 @@ class DOMRenderer {
     text.textContent = unit.translatedText;
     wrapper.appendChild(label);
     wrapper.appendChild(text);
+    this.bindTooltip(wrapper, unit.translatedText);
     return wrapper;
+  }
+  /**
+   * 绑定 tooltip：mouseenter 显示完整译文，mouseleave 隐藏
+   */
+  bindTooltip(el, fullText) {
+    el.addEventListener("mouseenter", (e) => {
+      const tooltip = this.ensureTooltip();
+      tooltip.textContent = fullText;
+      tooltip.style.display = "block";
+      this.positionTooltip(tooltip, e);
+    });
+    el.addEventListener("mousemove", (e) => {
+      const tooltip = document.getElementById("dt-tooltip");
+      if (tooltip && tooltip.style.display !== "none") {
+        this.positionTooltip(tooltip, e);
+      }
+    });
+    el.addEventListener("mouseleave", () => {
+      const tooltip = document.getElementById("dt-tooltip");
+      if (tooltip) tooltip.style.display = "none";
+    });
+  }
+  /**
+   * 确保全局 tooltip 元素存在
+   */
+  ensureTooltip() {
+    const existing = document.getElementById("dt-tooltip");
+    if (existing) return existing;
+    const tooltip = document.createElement("div");
+    tooltip.id = "dt-tooltip";
+    tooltip.style.cssText = [
+      "position:fixed",
+      "display:none",
+      "background:rgba(0,0,0,0.9)",
+      "color:#fff",
+      "padding:8px 12px",
+      "border-radius:4px",
+      "font-size:13px",
+      "max-width:400px",
+      "z-index:99999",
+      "line-height:1.5",
+      "pointer-events:none",
+      "white-space:normal",
+      "word-break:break-word"
+    ].join(";");
+    document.body.appendChild(tooltip);
+    return tooltip;
+  }
+  /**
+   * 定位 tooltip 到鼠标上方 8px
+   */
+  positionTooltip(tooltip, e) {
+    const offsetX = 12;
+    const offsetY = 8;
+    let left = e.clientX + offsetX;
+    let top = e.clientY - tooltip.offsetHeight - offsetY;
+    if (left + tooltip.offsetWidth > window.innerWidth - 8) {
+      left = window.innerWidth - tooltip.offsetWidth - 8;
+    }
+    if (top < 8) {
+      top = e.clientY + offsetY;
+    }
+    if (left < 8) left = 8;
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
   }
   /**
    * 注入显示模式控制的 CSS 样式
@@ -572,6 +693,7 @@ async function translatePage() {
   if (isTranslating) return;
   isTranslating = true;
   try {
+    renderer?.clear();
     const scanner = new DOMScanner();
     const units = scanner.scan();
     const builder = new UnitBuilder();
@@ -692,7 +814,10 @@ function injectFloatingBar() {
     "font-family:sans-serif",
     "font-size:13px"
   ].join(";");
-  bar.appendChild(createBtn("翻译", translatePage, "#1890ff", "#fff"));
+  bar.appendChild(createBtn("翻译", () => {
+    renderer?.clear();
+    translatePage();
+  }, "#1890ff", "#fff"));
   bar.appendChild(createBtn("还原", () => renderer?.clear(), "#595959", "#fff"));
   const sep = document.createElement("span");
   sep.style.cssText = "color:#d9d9d9;line-height:28px;";

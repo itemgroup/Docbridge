@@ -6,20 +6,21 @@ import type { TranslationUnit, UnitType } from '../../shared/types';
 const MAIN_SELECTORS = [
   'article', 'main', '[role="main"]', '.content', '.documentation',
   '.markdown-body', '.post-content', '.article-content', '.entry-content',
+  '.main-content', '#main', '.docs', '.readme', '[class*="content"]', '[class*="main"]',
 ];
 
-/** 排除区块的选择器 */
+/** 排除区块的选择器（仅排除明确的导航/页脚/广告元素） */
 const EXCLUDE_SELECTORS = [
-  'nav', 'header', 'footer', 'aside',
-  '[role="banner"]', '[role="complementary"]', '[role="navigation"]',
-  '.sidebar', '.nav', '.menu', '.advertisement', '.cookie-banner', '.announcement',
+  'nav', 'header[role="banner"]', 'footer',
+  '[role="navigation"]', '[role="banner"]',
+  '.sidebar', '.advertisement', '.cookie-banner', '.announcement',
 ];
 
-/** 排除的 class/id 关键词 */
-const EXCLUDE_KEYWORDS = ['nav', 'footer', 'sidebar', 'ad-', 'cookie', 'comment'];
+/** 排除的 class/id 关键词（仅匹配完整单词，避免误排除 "navigation" 之类） */
+const EXCLUDE_KEYWORDS = ['ad-', 'advertisement', 'cookie-banner', 'comment-section', 'social-share'];
 
-/** 行内元素标签（不作独立翻译单元） */
-const INLINE_TAGS = new Set(['A', 'CODE', 'STRONG', 'EM', 'SPAN', 'B', 'I', 'U', 'SMALL', 'MARK', 'SUB', 'SUP']);
+/** 行内元素标签（不作独立翻译单元，但其长文本 span 会被扫描） */
+const INLINE_TAGS = new Set(['CODE', 'STRONG', 'EM', 'B', 'I', 'U', 'SMALL', 'MARK', 'SUB', 'SUP']);
 
 /** 应跳过的标签 */
 const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'BR', 'HR']);
@@ -96,6 +97,8 @@ export class DOMScanner {
   private shouldSkip(el: HTMLElement): boolean {
     if (el.hasAttribute('data-dt-processed')) return true;
     if (SKIP_TAGS.has(el.tagName.toUpperCase())) return true;
+    // 跳过不可见元素（display:none 或 visibility:hidden）
+    if (!this.isVisible(el)) return true;
     // 检查排除关键词
     const classAndId = (el.className + ' ' + el.id).toLowerCase();
     if (EXCLUDE_KEYWORDS.some((kw) => classAndId.includes(kw))) return true;
@@ -103,8 +106,18 @@ export class DOMScanner {
   }
 
   /**
+   * 检查元素是否可见
+   */
+  private isVisible(el: HTMLElement): boolean {
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (parseFloat(style.opacity) === 0) return false;
+    return true;
+  }
+
+  /**
    * 根据标签和 DOM 位置判断翻译单元类型
-   * 行内元素返回 null（不作为独立单元）
+   * 扩大扫描范围：span(a), section, blockquote, dd, dt 等
    */
   private getElementType(tag: string, el: HTMLElement): UnitType | null {
     switch (tag) {
@@ -118,8 +131,34 @@ export class DOMScanner {
         return 'table_cell';
       case 'FIGCAPTION':
         return 'caption';
+      case 'SECTION':
+        return 'paragraph';
+      case 'BLOCKQUOTE':
+        return 'paragraph';
+      case 'DD': case 'DT':
+        return 'list_item';
+      case 'A': {
+        // a 标签：仅当文本长度 > 10 且不是导航链接（不在 nav 内，href 不是纯锚点）
+        if (el.closest('nav')) return null;
+        const href = el.getAttribute('href') ?? '';
+        if (href.startsWith('#') && href.length <= 10) return null;
+        const text = this.extractText(el);
+        if (text.length > 10) return 'paragraph';
+        return null;
+      }
+      case 'SPAN': {
+        // span：仅当文本长度 > 30 且父元素不是 p/div（避免重复）
+        const parent = el.parentElement;
+        if (parent) {
+          const pTag = parent.tagName.toUpperCase();
+          if (pTag === 'P' || pTag === 'DIV' || pTag === 'LI' || pTag === 'TD' || pTag === 'TH') return null;
+        }
+        const text = this.extractText(el);
+        if (text.length > 30) return 'paragraph';
+        return null;
+      }
       default: {
-        // pre > code 是 code_block（只处理 pre 元素本身，其子 code 不独立）
+        // pre > code 是 code_block
         if (tag === 'PRE') {
           const codeChild = el.querySelector('code');
           return codeChild ? 'code_block' : null;
@@ -132,8 +171,6 @@ export class DOMScanner {
         if (el.classList.contains('caption')) {
           return 'caption';
         }
-        // 行内元素不独立
-        if (INLINE_TAGS.has(tag)) return null;
         return null;
       }
     }

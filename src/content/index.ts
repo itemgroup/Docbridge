@@ -39,6 +39,9 @@ async function translatePage(): Promise<void> {
   isTranslating = true;
 
   try {
+    // 清除旧译文状态，确保重新扫描不被旧标记干扰
+    renderer?.clear();
+
     // Step 1: 扫描 DOM
     const scanner = new DOMScanner();
     const units = scanner.scan();
@@ -198,8 +201,11 @@ function injectFloatingBar(): void {
     'font-size:13px',
   ].join(';');
 
-  // 翻译按钮
-  bar.appendChild(createBtn('翻译', translatePage, '#1890ff', '#fff'));
+  // 翻译按钮（先清除旧状态再翻译，确保可重复翻译）
+  bar.appendChild(createBtn('翻译', () => {
+    renderer?.clear();
+    translatePage();
+  }, '#1890ff', '#fff'));
   // 还原按钮
   bar.appendChild(createBtn('还原', () => renderer?.clear(), '#595959', '#fff'));
   // 分隔线

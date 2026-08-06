@@ -67,14 +67,23 @@ export class DOMRenderer {
   }
 
   /**
-   * 清除所有译文节点和标记
+   * 清除所有译文节点和标记（包括 scanner 的 data-dt-processed，确保可重新翻译）
    */
   clear(): void {
-    const bridges = document.querySelectorAll(`.${DT_BRIDGE_CLASS}`);
-    bridges.forEach((el) => el.remove());
-    const translated = document.querySelectorAll(`[data-dt-translated]`);
-    translated.forEach((el) => el.removeAttribute('data-dt-translated'));
-    // 重置模式
+    // 1. 移除所有 .dt-bridge 节点
+    document.querySelectorAll(`.${DT_BRIDGE_CLASS}`).forEach((el) => el.remove());
+    // 2. 移除所有 data-dt-translated 标记
+    document.querySelectorAll('[data-dt-translated]').forEach((el) => {
+      el.removeAttribute('data-dt-translated');
+    });
+    // 3. 移除所有 data-dt-processed 标记（关键！否则 scanner 会跳过）
+    document.querySelectorAll('[data-dt-processed]').forEach((el) => {
+      el.removeAttribute('data-dt-processed');
+    });
+    // 4. 隐藏 tooltip（如果存在）
+    const tooltip = document.getElementById('dt-tooltip');
+    if (tooltip) tooltip.style.display = 'none';
+    // 5. 重置模式
     for (const cls of Object.values(MODE_CLASS_MAP)) {
       document.body.classList.remove(cls);
     }
@@ -110,14 +119,24 @@ export class DOMRenderer {
   }
 
   /**
-   * 构建 dt-bridge 译文节点
+   * 构建 dt-bridge 译文节点（含 tooltip 事件 + 自动换行样式）
    */
   private buildBridge(unit: TranslatedUnit): HTMLSpanElement {
     const wrapper = document.createElement('span');
     wrapper.className = DT_BRIDGE_CLASS;
     wrapper.setAttribute(DT_ID_ATTR, unit.id);
-    wrapper.style.cssText =
-      'display:block;margin-top:4px;padding:4px 0;border-left:3px solid #1890ff;padding-left:8px;';
+    wrapper.style.cssText = [
+      'display:block',
+      'margin-top:4px',
+      'padding:4px 0',
+      'border-left:3px solid #1890ff',
+      'padding-left:8px',
+      'white-space:normal',
+      'word-break:break-word',
+      'overflow-wrap:break-word',
+      'position:relative',
+      'z-index:1',
+    ].join(';');
 
     // 代码块用等宽字体
     if (unit.originalUnit?.type === 'code_block') {
@@ -140,7 +159,82 @@ export class DOMRenderer {
 
     wrapper.appendChild(label);
     wrapper.appendChild(text);
+
+    // 绑定 tooltip 事件
+    this.bindTooltip(wrapper, unit.translatedText);
+
     return wrapper;
+  }
+
+  /**
+   * 绑定 tooltip：mouseenter 显示完整译文，mouseleave 隐藏
+   */
+  private bindTooltip(el: HTMLElement, fullText: string): void {
+    el.addEventListener('mouseenter', (e: MouseEvent) => {
+      const tooltip = this.ensureTooltip();
+      tooltip.textContent = fullText;
+      tooltip.style.display = 'block';
+      this.positionTooltip(tooltip, e);
+    });
+    el.addEventListener('mousemove', (e: MouseEvent) => {
+      const tooltip = document.getElementById('dt-tooltip');
+      if (tooltip && tooltip.style.display !== 'none') {
+        this.positionTooltip(tooltip, e);
+      }
+    });
+    el.addEventListener('mouseleave', () => {
+      const tooltip = document.getElementById('dt-tooltip');
+      if (tooltip) tooltip.style.display = 'none';
+    });
+  }
+
+  /**
+   * 确保全局 tooltip 元素存在
+   */
+  private ensureTooltip(): HTMLElement {
+    const existing = document.getElementById('dt-tooltip');
+    if (existing) return existing;
+    const tooltip = document.createElement('div');
+    tooltip.id = 'dt-tooltip';
+    tooltip.style.cssText = [
+      'position:fixed',
+      'display:none',
+      'background:rgba(0,0,0,0.9)',
+      'color:#fff',
+      'padding:8px 12px',
+      'border-radius:4px',
+      'font-size:13px',
+      'max-width:400px',
+      'z-index:99999',
+      'line-height:1.5',
+      'pointer-events:none',
+      'white-space:normal',
+      'word-break:break-word',
+    ].join(';');
+    document.body.appendChild(tooltip);
+    return tooltip;
+  }
+
+  /**
+   * 定位 tooltip 到鼠标上方 8px
+   */
+  private positionTooltip(tooltip: HTMLElement, e: MouseEvent): void {
+    const offsetX = 12;
+    const offsetY = 8;
+    let left = e.clientX + offsetX;
+    let top = e.clientY - tooltip.offsetHeight - offsetY;
+
+    // 边界修正：不超出视口
+    if (left + tooltip.offsetWidth > window.innerWidth - 8) {
+      left = window.innerWidth - tooltip.offsetWidth - 8;
+    }
+    if (top < 8) {
+      top = e.clientY + offsetY; // 显示在鼠标下方
+    }
+    if (left < 8) left = 8;
+
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
   }
 
   /**
