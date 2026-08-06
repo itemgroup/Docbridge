@@ -32,7 +32,8 @@ export interface TranslationUnit {
 export interface TranslatedUnit {
   id: string;
   translatedText: string;
-  originalUnit: TranslationUnit;
+  /** 原始单元引用，SW 环境可能为 null（由 content script 端重建） */
+  originalUnit: TranslationUnit | null;
 }
 
 /** 翻译请求（发送给 Provider 的批量请求） */

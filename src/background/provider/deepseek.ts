@@ -150,22 +150,13 @@ export class DeepSeekProvider implements TranslationProvider {
     }
 
     // 只返回成功解析的单元，丢失的跳过（下次重新翻译）
+    // SW 环境无 DOM，originalUnit 为 null，由 content script 端根据 batch 原始数据重建
     return request.units
       .filter((u) => resultMap.has(u.id))
       .map((u) => ({
         id: u.id,
         translatedText: resultMap.get(u.id)!,
-        originalUnit: {
-          id: u.id,
-          type: 'paragraph',
-          element: document.createElement('div'),
-          originalText: u.text,
-          htmlContext: '',
-          contextChain: u.contextChain,
-          isInShadowDOM: false,
-          isInIframe: false,
-          priority: 5,
-        },
+        originalUnit: null,
       }));
   }
 

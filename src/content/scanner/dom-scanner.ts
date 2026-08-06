@@ -47,13 +47,8 @@ export class DOMScanner {
       const el = document.querySelector(sel);
       if (el instanceof HTMLElement) return el;
     }
-    // 回退到 body，先排除非内容区域
-    const body = document.body;
-    const clone = body.cloneNode(true) as HTMLElement;
-    EXCLUDE_SELECTORS.forEach((sel) => {
-      clone.querySelectorAll(sel).forEach((e) => e.remove());
-    });
-    return body;
+    // 回退到 body，walk() 遍历时会通过 shouldSkip() 排除非内容区域
+    return document.body;
   }
 
   /**

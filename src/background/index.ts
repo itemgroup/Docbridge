@@ -21,12 +21,33 @@ let translateProvider: DeepSeekProvider | null = null;
 // ---------- 启动时初始化 ----------
 
 (async function init() {
-  // 从 storage 读取 API Key 初始化 Provider
-  const result = await chrome.storage.local.get('docbridge:api_key');
-  const apiKey: string | undefined = result['docbridge:api_key'];
+  // 从 storage 读取 API Key 初始化 Provider（与 options 页面共享同一键 docbridge:options）
+  const result = await chrome.storage.local.get('docbridge:options');
+  const options = result['docbridge:options'];
+  const apiKey: string | undefined = options?.apiKey;
   if (apiKey) {
     translateProvider = new DeepSeekProvider(apiKey);
   }
+
+  // 监听 storage 变更，API Key 更新后同步 Provider
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    const optionsChange = changes['docbridge:options'];
+    if (optionsChange?.newValue?.apiKey !== undefined) {
+      const newKey: string = optionsChange.newValue.apiKey;
+      if (newKey) {
+        if (translateProvider) {
+          translateProvider.setApiKey(newKey);
+        } else {
+          translateProvider = new DeepSeekProvider(newKey);
+        }
+      } else {
+        // API Key 被清空，销毁 Provider 防止残留旧密钥
+        translateProvider = null;
+      }
+    }
+  });
+
   // 清理过期缓存
   clearExpiredCache().catch((err: unknown) => {
     console.error('[DocBridge] 清理过期缓存失败:', err);

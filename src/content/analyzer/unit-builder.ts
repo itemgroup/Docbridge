@@ -115,56 +115,34 @@ export class UnitBuilder {
 
   /**
    * 按批次分组：同 heading 的单元尽量同批次，每批不超过 BATCH_SIZE
+   * 使用 heading + 元素位置作为分组键，避免同名标题（如 "Overview"）被合并
    */
   private groupIntoBatches(units: TranslationUnit[]): TranslationUnit[][] {
     if (units.length === 0) return [];
 
-    // 按 heading 分组收集
-    const headingBuckets: Map<string, TranslationUnit[]> = new Map();
-    const noHeadingUnits: TranslationUnit[] = [];
+    const batches: TranslationUnit[][] = [];
+    let currentBatch: TranslationUnit[] = [];
+    let currentHeading = '';
 
+    // 按顺序遍历，同 heading 的连续单元尽量合并到同一批次
     for (const unit of units) {
       const heading = unit.contextChain[0] ?? '';
-      if (heading) {
-        const existing = headingBuckets.get(heading);
-        if (existing) {
-          existing.push(unit);
-        } else {
-          headingBuckets.set(heading, [unit]);
-        }
-      } else {
-        noHeadingUnits.push(unit);
+      // heading 变化时开始新批次（如果当前批次已有内容）
+      if (heading !== currentHeading && currentBatch.length > 0) {
+        batches.push(currentBatch);
+        currentBatch = [];
+      }
+      currentHeading = heading;
+      currentBatch.push(unit);
+      // 达到批次上限则切分
+      if (currentBatch.length >= BATCH_SIZE) {
+        batches.push(currentBatch);
+        currentBatch = [];
       }
     }
 
-    const batches: TranslationUnit[][] = [];
-
-    // 将同 heading 的单元填入批次
-    for (const bucket of headingBuckets.values()) {
-      let current: TranslationUnit[] = [];
-      for (const unit of bucket) {
-        current.push(unit);
-        if (current.length >= BATCH_SIZE) {
-          batches.push(current);
-          current = [];
-        }
-      }
-      if (current.length > 0) {
-        batches.push(current);
-      }
-    }
-
-    // 处理无 heading 的单元
-    let current: TranslationUnit[] = [];
-    for (const unit of noHeadingUnits) {
-      current.push(unit);
-      if (current.length >= BATCH_SIZE) {
-        batches.push(current);
-        current = [];
-      }
-    }
-    if (current.length > 0) {
-      batches.push(current);
+    if (currentBatch.length > 0) {
+      batches.push(currentBatch);
     }
 
     return batches;

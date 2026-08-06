@@ -29,6 +29,9 @@ export class TranslationQueue {
   /** 是否已注册消息监听 */
   private listenerRegistered = false;
 
+  /** 防止 start() 重入 */
+  private isRunning = false;
+
   constructor(callbacks: QueueCallbacks) {
     this.onProgress = callbacks.onProgress;
     this.onComplete = callbacks.onComplete;
@@ -40,6 +43,10 @@ export class TranslationQueue {
    * 启动翻译：逐批次发送、等待结果、上报进度
    */
   async start(batches: TranslationUnit[][]): Promise<void> {
+    if (this.isRunning) return;
+    this.isRunning = true;
+
+    try {
     const allResults: TranslatedUnit[] = [];
     let totalUnits = 0;
     for (const batch of batches) totalUnits += batch.length;
@@ -117,6 +124,9 @@ export class TranslationQueue {
     }
 
     this.onComplete(allResults);
+    } finally {
+    this.isRunning = false;
+    }
   }
 
   /** 销毁队列，移除监听 */

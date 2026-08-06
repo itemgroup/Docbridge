@@ -1,4 +1,3 @@
-import { a as DT_BRIDGE_CLASS, b as DT_ID_ATTR, c as DT_LABEL_CLASS, d as DT_TEXT_CLASS } from "../chunks/constants-CoCYY9Y6.js";
 const MAIN_SELECTORS = [
   "article",
   "main",
@@ -9,21 +8,6 @@ const MAIN_SELECTORS = [
   ".post-content",
   ".article-content",
   ".entry-content"
-];
-const EXCLUDE_SELECTORS = [
-  "nav",
-  "header",
-  "footer",
-  "aside",
-  '[role="banner"]',
-  '[role="complementary"]',
-  '[role="navigation"]',
-  ".sidebar",
-  ".nav",
-  ".menu",
-  ".advertisement",
-  ".cookie-banner",
-  ".announcement"
 ];
 const EXCLUDE_KEYWORDS = ["nav", "footer", "sidebar", "ad-", "cookie", "comment"];
 const INLINE_TAGS = /* @__PURE__ */ new Set(["A", "CODE", "STRONG", "EM", "SPAN", "B", "I", "U", "SMALL", "MARK", "SUB", "SUP"]);
@@ -48,12 +32,7 @@ class DOMScanner {
       const el = document.querySelector(sel);
       if (el instanceof HTMLElement) return el;
     }
-    const body = document.body;
-    const clone = body.cloneNode(true);
-    EXCLUDE_SELECTORS.forEach((sel) => {
-      clone.querySelectorAll(sel).forEach((e) => e.remove());
-    });
-    return body;
+    return document.body;
   }
   /**
    * 递归遍历 DOM 树，对符合条件的节点生成 TranslationUnit
@@ -267,48 +246,28 @@ class UnitBuilder {
   }
   /**
    * 按批次分组：同 heading 的单元尽量同批次，每批不超过 BATCH_SIZE
+   * 使用 heading + 元素位置作为分组键，避免同名标题（如 "Overview"）被合并
    */
   groupIntoBatches(units) {
     if (units.length === 0) return [];
-    const headingBuckets = /* @__PURE__ */ new Map();
-    const noHeadingUnits = [];
+    const batches = [];
+    let currentBatch = [];
+    let currentHeading = "";
     for (const unit of units) {
       const heading = unit.contextChain[0] ?? "";
-      if (heading) {
-        const existing = headingBuckets.get(heading);
-        if (existing) {
-          existing.push(unit);
-        } else {
-          headingBuckets.set(heading, [unit]);
-        }
-      } else {
-        noHeadingUnits.push(unit);
+      if (heading !== currentHeading && currentBatch.length > 0) {
+        batches.push(currentBatch);
+        currentBatch = [];
+      }
+      currentHeading = heading;
+      currentBatch.push(unit);
+      if (currentBatch.length >= BATCH_SIZE) {
+        batches.push(currentBatch);
+        currentBatch = [];
       }
     }
-    const batches = [];
-    for (const bucket of headingBuckets.values()) {
-      let current2 = [];
-      for (const unit of bucket) {
-        current2.push(unit);
-        if (current2.length >= BATCH_SIZE) {
-          batches.push(current2);
-          current2 = [];
-        }
-      }
-      if (current2.length > 0) {
-        batches.push(current2);
-      }
-    }
-    let current = [];
-    for (const unit of noHeadingUnits) {
-      current.push(unit);
-      if (current.length >= BATCH_SIZE) {
-        batches.push(current);
-        current = [];
-      }
-    }
-    if (current.length > 0) {
-      batches.push(current);
+    if (currentBatch.length > 0) {
+      batches.push(currentBatch);
     }
     return batches;
   }
@@ -318,6 +277,7 @@ class TranslationQueue {
   constructor(callbacks) {
     this.pendingResolver = null;
     this.listenerRegistered = false;
+    this.isRunning = false;
     this.handleMessage = (message) => {
       if (message.type === "TRANSLATE_RESULT" && this.pendingResolver) {
         const { results } = message.payload;
@@ -333,69 +293,75 @@ class TranslationQueue {
    * 启动翻译：逐批次发送、等待结果、上报进度
    */
   async start(batches) {
-    const allResults = [];
-    let totalUnits = 0;
-    for (const batch of batches) totalUnits += batch.length;
-    let translatedCount = 0;
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-      try {
-        const cached = [];
-        const uncached = [];
-        for (const unit of batch) {
-          const hash = await hashText(unit.originalText);
-          const cacheRsp = await chrome.runtime.sendMessage({
-            type: "GET_CACHE",
-            payload: { originalHash: hash }
-          });
-          if (cacheRsp?.translatedText) {
-            cached.push({ id: unit.id, translatedText: cacheRsp.translatedText });
-          } else {
-            uncached.push(unit);
-          }
-        }
-        if (uncached.length > 0) {
-          const translatePromise = new Promise((resolve) => {
-            this.pendingResolver = resolve;
-          });
-          await chrome.runtime.sendMessage({
-            type: "TRANSLATE",
-            payload: {
-              units: uncached.map((u) => ({
-                id: u.id,
-                text: u.originalText,
-                contextChain: u.contextChain
-              })),
-              glossary: {},
-              targetLang: "zh-CN"
-            }
-          });
-          const translated = await translatePromise;
-          cached.push(...translated);
-          this.pendingResolver = null;
-        }
-        for (const r of cached) {
-          const original = batch.find((u) => u.id === r.id);
-          if (original) {
-            allResults.push({
-              id: r.id,
-              translatedText: r.translatedText,
-              originalUnit: original
+    if (this.isRunning) return;
+    this.isRunning = true;
+    try {
+      const allResults = [];
+      let totalUnits = 0;
+      for (const batch of batches) totalUnits += batch.length;
+      let translatedCount = 0;
+      for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
+        try {
+          const cached = [];
+          const uncached = [];
+          for (const unit of batch) {
+            const hash = await hashText(unit.originalText);
+            const cacheRsp = await chrome.runtime.sendMessage({
+              type: "GET_CACHE",
+              payload: { originalHash: hash }
             });
+            if (cacheRsp?.translatedText) {
+              cached.push({ id: unit.id, translatedText: cacheRsp.translatedText });
+            } else {
+              uncached.push(unit);
+            }
           }
+          if (uncached.length > 0) {
+            const translatePromise = new Promise((resolve) => {
+              this.pendingResolver = resolve;
+            });
+            await chrome.runtime.sendMessage({
+              type: "TRANSLATE",
+              payload: {
+                units: uncached.map((u) => ({
+                  id: u.id,
+                  text: u.originalText,
+                  contextChain: u.contextChain
+                })),
+                glossary: {},
+                targetLang: "zh-CN"
+              }
+            });
+            const translated = await translatePromise;
+            cached.push(...translated);
+            this.pendingResolver = null;
+          }
+          for (const r of cached) {
+            const original = batch.find((u) => u.id === r.id);
+            if (original) {
+              allResults.push({
+                id: r.id,
+                translatedText: r.translatedText,
+                originalUnit: original
+              });
+            }
+          }
+          translatedCount += cached.length;
+          this.onProgress(translatedCount, totalUnits);
+          if (i < batches.length - 1) {
+            await sleep(BATCH_DELAY_MS);
+          }
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          console.error(`[DocBridge] 翻译批次 ${i} 失败:`, error.message);
+          this.onError?.(error);
         }
-        translatedCount += cached.length;
-        this.onProgress(translatedCount, totalUnits);
-        if (i < batches.length - 1) {
-          await sleep(BATCH_DELAY_MS);
-        }
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        console.error(`[DocBridge] 翻译批次 ${i} 失败:`, error.message);
-        this.onError?.(error);
       }
+      this.onComplete(allResults);
+    } finally {
+      this.isRunning = false;
     }
-    this.onComplete(allResults);
   }
   /** 销毁队列，移除监听 */
   destroy() {
@@ -423,6 +389,10 @@ async function hashText(text) {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+const DT_BRIDGE_CLASS = "dt-bridge";
+const DT_LABEL_CLASS = "dt-label";
+const DT_TEXT_CLASS = "dt-text";
+const DT_ID_ATTR = "data-dt-id";
 const MODE_CLASS_MAP = {
   "bilingual": "dt-mode-bilingual",
   "translated-only": "dt-mode-translated-only",
@@ -481,6 +451,7 @@ class DOMRenderer {
    * 渲染单个译文单元
    */
   renderOne(unit) {
+    if (!unit.originalUnit) return;
     const el = unit.originalUnit.element;
     if (!el || !document.contains(el)) return;
     if (el.hasAttribute("data-dt-translated")) return;
@@ -496,7 +467,7 @@ class DOMRenderer {
     wrapper.className = DT_BRIDGE_CLASS;
     wrapper.setAttribute(DT_ID_ATTR, unit.id);
     wrapper.style.cssText = "display:block;margin-top:4px;padding:4px 0;border-left:3px solid #1890ff;padding-left:8px;";
-    if (unit.originalUnit.type === "code_block") {
+    if (unit.originalUnit?.type === "code_block") {
       wrapper.style.fontFamily = "monospace";
       wrapper.style.backgroundColor = "#f6f8fa";
       wrapper.style.borderRadius = "4px";

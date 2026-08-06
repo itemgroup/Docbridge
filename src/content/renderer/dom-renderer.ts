@@ -1,12 +1,12 @@
 // src/content/renderer/dom-renderer.ts — 译文渲染引擎：零侵入插入 + 显示模式切换 | DocBridge | 2025-08-06
 
 import type { TranslatedUnit, DisplayMode } from '../../shared/types';
-import {
-  DT_BRIDGE_CLASS,
-  DT_LABEL_CLASS,
-  DT_TEXT_CLASS,
-  DT_ID_ATTR,
-} from '../../shared/constants';
+
+// 内容脚本必须输出为单文件 classic script，避免依赖共享 chunk。
+const DT_BRIDGE_CLASS = 'dt-bridge';
+const DT_LABEL_CLASS = 'dt-label';
+const DT_TEXT_CLASS = 'dt-text';
+const DT_ID_ATTR = 'data-dt-id';
 
 /** 模式对应的 body class */
 const MODE_CLASS_MAP: Record<DisplayMode, string> = {
@@ -80,6 +80,8 @@ export class DOMRenderer {
    * 渲染单个译文单元
    */
   private renderOne(unit: TranslatedUnit): void {
+    // originalUnit 在 background SW 返回时可能为 null，跳过
+    if (!unit.originalUnit) return;
     const el = unit.originalUnit.element;
     // 元素引用为空或已不在 DOM 中，跳过
     if (!el || !document.contains(el)) return;
@@ -102,7 +104,7 @@ export class DOMRenderer {
       'display:block;margin-top:4px;padding:4px 0;border-left:3px solid #1890ff;padding-left:8px;';
 
     // 代码块用等宽字体
-    if (unit.originalUnit.type === 'code_block') {
+    if (unit.originalUnit?.type === 'code_block') {
       wrapper.style.fontFamily = 'monospace';
       wrapper.style.backgroundColor = '#f6f8fa';
       wrapper.style.borderRadius = '4px';

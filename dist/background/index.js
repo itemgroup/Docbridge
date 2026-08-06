@@ -1,4 +1,12 @@
-import { D as DEEPSEEK_API_CONFIG, M as MAX_RETRIES, R as RETRY_BASE_DELAY_MS } from "../chunks/constants-CoCYY9Y6.js";
+const DEEPSEEK_API_CONFIG = {
+  baseURL: "https://api.deepseek.com/v1",
+  model: "deepseek-chat",
+  temperature: 0.3,
+  max_tokens: 4096,
+  timeout: 1e4
+};
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 1e3;
 const SYSTEM_PROMPT = `你是一位专业的技术文档翻译专家，将用户提供的英文技术文档内容翻译为简体中文。
 【核心规则】
 信：忠实原文技术含义；达：译文通顺易懂；雅：符合中文技术文档表达习惯
@@ -120,17 +128,7 @@ ${unit.text}`;
     return request.units.filter((u) => resultMap.has(u.id)).map((u) => ({
       id: u.id,
       translatedText: resultMap.get(u.id),
-      originalUnit: {
-        id: u.id,
-        type: "paragraph",
-        element: document.createElement("div"),
-        originalText: u.text,
-        htmlContext: "",
-        contextChain: u.contextChain,
-        isInShadowDOM: false,
-        isInIframe: false,
-        priority: 5
-      }
+      originalUnit: null
     }));
   }
   /**
@@ -144,11 +142,28 @@ const CACHE_PREFIX = "docbridge:cache:";
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
 let translateProvider = null;
 (async function init() {
-  const result = await chrome.storage.local.get("docbridge:api_key");
-  const apiKey = result["docbridge:api_key"];
+  const result = await chrome.storage.local.get("docbridge:options");
+  const options = result["docbridge:options"];
+  const apiKey = options?.apiKey;
   if (apiKey) {
     translateProvider = new DeepSeekProvider(apiKey);
   }
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    const optionsChange = changes["docbridge:options"];
+    if (optionsChange?.newValue?.apiKey !== void 0) {
+      const newKey = optionsChange.newValue.apiKey;
+      if (newKey) {
+        if (translateProvider) {
+          translateProvider.setApiKey(newKey);
+        } else {
+          translateProvider = new DeepSeekProvider(newKey);
+        }
+      } else {
+        translateProvider = null;
+      }
+    }
+  });
   clearExpiredCache().catch((err) => {
     console.error("[DocBridge] 清理过期缓存失败:", err);
   });
