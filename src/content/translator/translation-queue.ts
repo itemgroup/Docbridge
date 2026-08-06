@@ -5,11 +5,11 @@ import type { TranslationUnit, TranslatedUnit, DTMessage } from '../../shared/ty
 /** 批次间延迟（毫秒），避免触发限流 */
 const BATCH_DELAY_MS = 100;
 
-/** 并发批次数（同时发送的翻译请求数） */
-const CONCURRENT_BATCHES = 3;
+/** 并发批次数（同时发送的翻译请求数，SW 是单线程，设为 1 避免排队超时） */
+const CONCURRENT_BATCHES = 1;
 
-/** sendMessage 超时时间（毫秒），超时视为 SW 不可达 */
-const MESSAGE_TIMEOUT_MS = 8000;
+/** sendMessage 超时时间（毫秒），SW 单线程处理 DeepSeek API 需要 3-8s */
+const MESSAGE_TIMEOUT_MS = 30000;
 
 /** 翻译结果结构（background 通过 TRANSLATE_RESULT 返回） */
 interface TranslateResultItem {
@@ -103,60 +103,41 @@ export class TranslationQueue {
 
   /**
    * 处理单个批次的翻译流程
+   * 缓存由 background SW 的 TRANSLATE handler 内部处理，不单独逐条查询
    */
   private async processBatch(
     batch: TranslationUnit[],
     batchIndex: number
   ): Promise<TranslateResultItem[]> {
     try {
-      const cached: TranslateResultItem[] = [];
-      const uncached: TranslationUnit[] = [];
+      const response = await this.sendMessage<{
+        success: boolean;
+        data?: TranslateResultItem[];
+        error?: string;
+      }>({
+        type: 'TRANSLATE',
+        payload: {
+          units: batch.map((u) => ({
+            id: u.id,
+            text: u.originalText,
+            contextChain: u.contextChain,
+          })),
+          glossary: {},
+          targetLang: 'zh-CN',
+        },
+      });
 
-      for (const unit of batch) {
-        const hash = await hashText(unit.originalText);
-        const cacheRsp = await this.sendMessage<{ translatedText?: string }>({
-          type: 'GET_CACHE',
-          payload: { originalHash: hash },
-        });
-        if (cacheRsp?.translatedText) {
-          cached.push({ id: unit.id, translatedText: cacheRsp.translatedText });
-        } else {
-          uncached.push(unit);
-        }
+      if (!response || !response.success) {
+        throw new Error(response?.error ?? '翻译失败');
       }
 
-      if (uncached.length > 0) {
-        const response = await this.sendMessage<{
-          success: boolean;
-          data?: TranslateResultItem[];
-          error?: string;
-        }>({
-          type: 'TRANSLATE',
-          payload: {
-            units: uncached.map((u) => ({
-              id: u.id,
-              text: u.originalText,
-              contextChain: u.contextChain,
-            })),
-            glossary: {},
-            targetLang: 'zh-CN',
-          },
-        });
-
-        if (!response || !response.success) {
-          throw new Error(response?.error ?? '翻译失败');
-        }
-
-        const translated = response.data ?? [];
-        if (translated.length === 0) {
-          console.warn(`[DocBridge] 批次 ${batchIndex + 1}: API 返回 0 条翻译结果`);
-        } else {
-          console.log(`[DocBridge] 批次 ${batchIndex + 1} 收到翻译结果:`, translated.length, '条');
-        }
-        cached.push(...translated);
+      const translated = response.data ?? [];
+      if (translated.length === 0) {
+        console.warn(`[DocBridge] 批次 ${batchIndex + 1}: API 返回 0 条翻译结果`);
+      } else {
+        console.log(`[DocBridge] 批次 ${batchIndex + 1} 收到翻译结果:`, translated.length, '条');
       }
-
-      return cached;
+      return translated;
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
       if (error.message.includes('Extension context invalidated')
@@ -204,17 +185,6 @@ export class TranslationQueue {
       });
     });
   }
-}
-
-/**
- * 计算文本 SHA-256 哈希（与 background 端保持一致，用于缓存键匹配）
- */
-async function hashText(text: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(text);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /**

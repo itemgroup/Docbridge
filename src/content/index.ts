@@ -13,20 +13,16 @@ let observer: MutationObserver | null = null;
 let lastUrl = location.href;
 let translateTimer: ReturnType<typeof setTimeout> | null = null;
 let isTranslating = false;
+/** 还原/模式切换期间暂停 MutationObserver，防止自身 DOM 操作触发重翻 */
+let isRestoring = false;
 
 // ---------- 初始化 ----------
 
 (function init(): void {
-  // 等待页面稳定后启动
-  const startDelay = 500;
-  if (document.readyState === 'complete') {
-    setTimeout(() => translatePage(), startDelay);
-  } else {
-    window.addEventListener('load', () => setTimeout(() => translatePage(), startDelay));
-  }
   setupMessageListener();
   setupMutationObserver();
-  injectFloatingBar();
+  // 页面加载时不清除旧栏（如果有），init 时不翻译
+  ensureFloatingBar();
 })();
 
 // ---------- 核心翻译流程 ----------
@@ -81,7 +77,8 @@ async function translatePage(): Promise<void> {
         if (renderer) renderer.render(results);
         console.log(`[DocBridge] 翻译完成: ${results.length} 个单元已渲染`);
         isTranslating = false;
-        connectObserver();
+        // 延迟重连 Observer，等渲染触发的 DOM 变更都完成后再监听
+        setTimeout(connectObserver, 500);
       },
       onError: (err) => {
         console.error('[DocBridge] 翻译错误:', err.message);
@@ -102,46 +99,30 @@ async function translatePage(): Promise<void> {
 
 /**
  * 使用 MutationObserver 检测 URL 变化或大量 DOM 新增
- * 过滤译文相关节点变更，防止自身触发的 DOM 变更导致死循环
+ * 翻译期间已 disconnect，避免自身产生的 DOM 变更触发循环
  */
 function setupMutationObserver(): void {
-  observer = new MutationObserver((mutations) => {
-    // 过滤：如果所有 addedNodes 都是译文相关节点，忽略
-    let allBridgeRelated = true;
-    for (const mutation of mutations) {
-      for (let i = 0; i < mutation.addedNodes.length; i++) {
-        const node = mutation.addedNodes[i];
-        if (node.nodeType !== Node.ELEMENT_NODE) {
-          allBridgeRelated = false;
-          break;
-        }
-        const el = node as Element;
-        if (!el.classList.contains('dt-bridge') && !el.closest('.dt-bridge')
-            && !el.hasAttribute('data-dt-translated') && !el.hasAttribute('data-dt-id')) {
-          allBridgeRelated = false;
-          break;
-        }
-      }
-      if (!allBridgeRelated) break;
-    }
-    if (allBridgeRelated) return;
+  observer = new MutationObserver(() => {
+    // 还原/模式切换期间跳过，防止重新翻译
+    if (isRestoring) return;
 
     // 防抖 1000ms
     if (translateTimer) clearTimeout(translateTimer);
     translateTimer = setTimeout(() => {
       const currentUrl = location.href;
-      // URL 变化 → 重新全量扫描
       if (currentUrl !== lastUrl) {
         lastUrl = currentUrl;
-        // SPA 路由切换：清除旧渲染并重新翻译
         if (renderer) renderer.clear();
         translatePage();
         return;
       }
-      // body 子树有新增节点（脏检查：统计未处理的文本节点）
       const unprocessed = document.querySelectorAll(
-        'p:not([data-dt-processed]), h1:not([data-dt-processed]), h2:not([data-dt-processed]), ' +
-        'h3:not([data-dt-processed]), li:not([data-dt-processed]), td:not([data-dt-processed])'
+        'p:not([data-dt-processed]):not([data-dt-translated]), ' +
+        'h1:not([data-dt-processed]):not([data-dt-translated]), ' +
+        'h2:not([data-dt-processed]):not([data-dt-translated]), ' +
+        'h3:not([data-dt-processed]):not([data-dt-translated]), ' +
+        'li:not([data-dt-processed]):not([data-dt-translated]), ' +
+        'td:not([data-dt-processed]):not([data-dt-translated])'
       );
       if (unprocessed.length > 5) {
         translatePage();
@@ -174,14 +155,23 @@ function setupMessageListener(): void {
     try {
       switch (message.type) {
         case 'TOGGLE_DISPLAY': {
-          const { mode } = message.payload as { mode: DisplayMode };
+          const mode = message.payload as DisplayMode;
           if (renderer) {
+            disconnectObserver();
+            if (translateTimer) { clearTimeout(translateTimer); translateTimer = null; }
+            isRestoring = true;
             renderer.setMode(mode);
+            setTimeout(() => {
+              isRestoring = false;
+              connectObserver();
+            }, 300);
           }
           sendResponse({ success: true });
           break;
         }
         case 'START_TRANSLATE': {
+          disconnectObserver();
+          renderer?.clear();
           translatePage();
           sendResponse({ success: true });
           break;
@@ -210,7 +200,17 @@ function setupMessageListener(): void {
 // ---------- 悬浮控制栏 ----------
 
 /**
- * 在页面右下角注入简易悬浮控制栏
+ * 确保悬浮栏存在（幂等操作，重复调用不重复创建）
+ */
+function ensureFloatingBar(): void {
+  if (document.getElementById('docbridge-floating-bar')) return;
+  injectFloatingBar();
+}
+
+/**
+ * 在页面右下角注入悬浮控制栏
+ * 所有按钮操作前 disconnectObserver，操作后延迟 reconnectObserver
+ * 避免自身 DOM 变更触发重新翻译
  */
 function injectFloatingBar(): void {
   const bar = document.createElement('div');
@@ -231,36 +231,63 @@ function injectFloatingBar(): void {
     'font-size:13px',
   ].join(';');
 
-  // 翻译按钮（先清除旧状态再翻译，确保可重复翻译）
-  bar.appendChild(createBtn('翻译', () => {
-    renderer?.clear();
-    translatePage();
-  }, '#1890ff', '#fff'));
-  // 还原按钮
-  bar.appendChild(createBtn('还原', () => renderer?.clear(), '#595959', '#fff'));
+  /** 执行带 observer 保护的操作 */
+  function safeAction(action: () => void, reconnectDelay = 300): void {
+    disconnectObserver();
+    if (translateTimer) { clearTimeout(translateTimer); translateTimer = null; }
+    isRestoring = true;
+    action();
+    // 延迟重置 isRestoring，等 DOM 操作产生的 mutation 都触发完
+    setTimeout(() => {
+      isRestoring = false;
+      connectObserver();
+    }, reconnectDelay);
+  }
+
+  bar.appendChild(createBtn('还原', () => {
+    safeAction(() => {
+      renderer?.clear();
+    }, 300);
+  }, '#595959', '#fff'));
+
   // 分隔线
-  const sep = document.createElement('span');
-  sep.style.cssText = 'color:#d9d9d9;line-height:28px;';
-  sep.textContent = '|';
-  bar.appendChild(sep);
-  // 模式按钮
-  bar.appendChild(createBtn('双语', () => renderer?.setMode('bilingual'), '#52c41a', '#fff'));
-  bar.appendChild(createBtn('仅译文', () => renderer?.setMode('translated-only'), '#faad14', '#fff'));
-  bar.appendChild(createBtn('仅原文', () => renderer?.setMode('original-only'), '#d9d9d9', '#333'));
+  bar.appendChild(createSep());
+
+  bar.appendChild(createBtn('双语', () => {
+    safeAction(() => {
+      renderer?.setMode('bilingual');
+    }, 200);
+  }, '#52c41a', '#fff'));
+
+  bar.appendChild(createBtn('仅译文', () => {
+    safeAction(() => {
+      renderer?.setMode('translated-only');
+    }, 200);
+  }, '#faad14', '#fff'));
+
+  bar.appendChild(createBtn('仅原文', () => {
+    safeAction(() => {
+      renderer?.setMode('original-only');
+    }, 200);
+  }, '#d9d9d9', '#333'));
+
   // 分隔线
-  const sep2 = document.createElement('span');
-  sep2.style.cssText = 'color:#d9d9d9;line-height:28px;';
-  sep2.textContent = '|';
-  bar.appendChild(sep2);
-  // 导出按钮
-  bar.appendChild(createBtn('导出', () => renderer?.exportHTML(), '#722ed1', '#fff'));
+  bar.appendChild(createSep());
+
+  bar.appendChild(createBtn('导出', () => {
+    renderer?.exportHTML();
+  }, '#722ed1', '#fff'));
 
   document.body.appendChild(bar);
 }
 
-/**
- * 创建控制栏按钮
- */
+function createSep(): HTMLSpanElement {
+  const sep = document.createElement('span');
+  sep.style.cssText = 'color:#d9d9d9;line-height:28px;';
+  sep.textContent = '|';
+  return sep;
+}
+
 function createBtn(
   text: string,
   onClick: () => void,

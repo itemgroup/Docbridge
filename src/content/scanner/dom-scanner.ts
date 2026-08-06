@@ -19,11 +19,14 @@ const EXCLUDE_SELECTORS = [
 /** 排除的 class/id 关键词（仅匹配完整单词，避免误排除 "navigation" 之类） */
 const EXCLUDE_KEYWORDS = ['ad-', 'advertisement', 'cookie-banner', 'comment-section', 'social-share'];
 
+/** 块级子元素选择器：如果元素包含这些子元素，则跳过自身，只扫描子元素 */
+const BLOCK_CHILD_SELECTORS = 'p, div, li, h1, h2, h3, h4, h5, h6, td, th, pre, blockquote, section, article, aside, figcaption, dd, dt, ul, ol, table';
+
 /** 行内元素标签（不作独立翻译单元，但其长文本 span 会被扫描） */
 const INLINE_TAGS = new Set(['CODE', 'STRONG', 'EM', 'B', 'I', 'U', 'SMALL', 'MARK', 'SUB', 'SUP']);
 
 /** 应跳过的标签 */
-const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'BR', 'HR']);
+const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'BR', 'HR', 'CODE']);
 
 /** 最小文本长度 */
 const MIN_TEXT_LENGTH = 3;
@@ -65,7 +68,10 @@ export class DOMScanner {
     const unitType = this.getElementType(tag, el);
 
     if (unitType !== null) {
-      const text = this.extractText(el);
+      // 代码块只提取注释行，代码逻辑不翻译
+      const text = unitType === 'code_block'
+        ? this.extractCodeComments(el)
+        : this.extractText(el);
       if (this.isValidText(text)) {
         // 向上查找最近标题作为上下文链
         const heading = unitType === 'heading'
@@ -96,8 +102,8 @@ export class DOMScanner {
    */
   private shouldSkip(el: HTMLElement): boolean {
     if (el.hasAttribute('data-dt-processed')) return true;
-    // 双重保险：如果元素内已有译文节点，说明已处理过
-    if (el.querySelector('.dt-bridge')) return true;
+    // 双重保险：如果元素已被标记为翻译过，跳过
+    if (el.hasAttribute('data-dt-translated')) return true;
     if (SKIP_TAGS.has(el.tagName.toUpperCase())) return true;
     // 跳过不可见元素（display:none 或 visibility:hidden）
     if (!this.isVisible(el)) return true;
@@ -134,6 +140,10 @@ export class DOMScanner {
       case 'FIGCAPTION':
         return 'caption';
       case 'SECTION':
+      case 'ARTICLE':
+      case 'ASIDE':
+        // 这些语义容器如果有块级子元素，跳过自身只扫描子元素
+        if (el.querySelector(BLOCK_CHILD_SELECTORS)) return null;
         return 'paragraph';
       case 'BLOCKQUOTE':
         return 'paragraph';
@@ -160,13 +170,12 @@ export class DOMScanner {
         return null;
       }
       default: {
-        // pre > code 是 code_block
+        // PRE 元素标记为 code_block（其内 CODE 子元素已被 SKIP_TAGS 跳过）
         if (tag === 'PRE') {
-          const codeChild = el.querySelector('code');
-          return codeChild ? 'code_block' : null;
+          return 'code_block';
         }
-        // div 仅当包含纯文本子内容时作为 paragraph
-        if (tag === 'DIV' && this.containsTextNode(el)) {
+        // div 仅当没有块级子元素且包含纯文本子内容时作为 paragraph
+        if (tag === 'DIV' && this.containsTextNode(el) && !el.querySelector(BLOCK_CHILD_SELECTORS)) {
           return 'paragraph';
         }
         // class 含 caption 的元素
@@ -185,6 +194,47 @@ export class DOMScanner {
     const clone = el.cloneNode(true) as HTMLElement;
     clone.querySelectorAll('script, style').forEach((n) => n.remove());
     return (clone.textContent ?? '').replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * 提取代码块中的注释行, 代码逻辑不翻译
+   */
+  private extractCodeComments(el: HTMLElement): string {
+    const code = el.textContent ?? '';
+    const lines = code.split('\n');
+    const comments: string[] = [];
+    let inBlockComment = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      if (inBlockComment) {
+        // 块注释内部：保留原行，检测结束标记
+        comments.push(line);
+        if (trimmed.includes('*/')) inBlockComment = false;
+        continue;
+      }
+
+      // # 单行注释
+      if (trimmed.startsWith('#')) {
+        comments.push(line);
+      }
+      // // 单行注释
+      else if (trimmed.startsWith('//')) {
+        comments.push(line);
+      }
+      // /* 块注释开始
+      else if (trimmed.startsWith('/*') || trimmed.includes('/*')) {
+        comments.push(line);
+        if (!trimmed.includes('*/')) inBlockComment = true;
+      }
+      // 中间星号行（如 * @param）
+      else if (trimmed.startsWith('*') && !trimmed.startsWith('**/')) {
+        comments.push(line);
+      }
+    }
+
+    return comments.join('\n');
   }
 
   /**

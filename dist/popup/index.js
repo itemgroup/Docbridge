@@ -105,7 +105,7 @@ async function handleModeChange(e) {
   const mode = target.value;
   const success = await sendToCurrentTab(currentTabId, {
     type: "TOGGLE_DISPLAY",
-    payload: { mode }
+    payload: mode
   });
   if (!success) {
     console.warn("[DocBridge] 模式切换消息发送失败");

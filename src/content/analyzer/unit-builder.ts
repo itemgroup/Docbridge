@@ -5,7 +5,7 @@ import type { TranslationUnit } from '../../shared/types';
 /** 前文摘要最大长度 */
 const CONTEXT_PREVIEW_LENGTH = 50;
 
-/** 批次最大单元数（DeepSeek 最大支持 20） */
+/** 批次最大单元数（对齐 DeepSeek API maxBatchSize=20） */
 const BATCH_SIZE = 20;
 
 export class UnitBuilder {

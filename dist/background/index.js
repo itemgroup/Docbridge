@@ -294,19 +294,19 @@ async function handleMessage(message, sender) {
       return { success: true, data: cached };
     }
     case "TOGGLE_DISPLAY": {
-      const { mode } = message.payload;
+      const mode = message.payload;
       const tabs = await chrome.tabs.query({});
       for (const tab of tabs) {
         if (tab.id == null) continue;
         try {
           await chrome.tabs.sendMessage(tab.id, {
             type: "TOGGLE_DISPLAY",
-            payload: { mode }
+            payload: mode
           });
         } catch {
         }
       }
-      return { success: true, mode };
+      return { success: true };
     }
     default:
       return { error: `未知消息类型: ${message.type}` };

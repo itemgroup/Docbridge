@@ -16,7 +16,8 @@ const MAIN_SELECTORS = [
   ".readme"
 ];
 const EXCLUDE_KEYWORDS = ["ad-", "advertisement", "cookie-banner", "comment-section", "social-share"];
-const SKIP_TAGS = /* @__PURE__ */ new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "INPUT", "TEXTAREA", "SELECT", "BUTTON", "BR", "HR"]);
+const BLOCK_CHILD_SELECTORS = "p, div, li, h1, h2, h3, h4, h5, h6, td, th, pre, blockquote, section, article, aside, figcaption, dd, dt, ul, ol, table";
+const SKIP_TAGS = /* @__PURE__ */ new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "INPUT", "TEXTAREA", "SELECT", "BUTTON", "BR", "HR", "CODE"]);
 const MIN_TEXT_LENGTH = 3;
 class DOMScanner {
   /**
@@ -50,7 +51,7 @@ class DOMScanner {
     const tag = el.tagName.toUpperCase();
     const unitType = this.getElementType(tag, el);
     if (unitType !== null) {
-      const text = this.extractText(el);
+      const text = unitType === "code_block" ? this.extractCodeComments(el) : this.extractText(el);
       if (this.isValidText(text)) {
         const heading = unitType === "heading" ? text : this.findNearestHeading(el);
         const contextChain = heading ? [heading] : [];
@@ -71,7 +72,7 @@ class DOMScanner {
    */
   shouldSkip(el) {
     if (el.hasAttribute("data-dt-processed")) return true;
-    if (el.querySelector(".dt-bridge")) return true;
+    if (el.hasAttribute("data-dt-translated")) return true;
     if (SKIP_TAGS.has(el.tagName.toUpperCase())) return true;
     if (!this.isVisible(el)) return true;
     const classAndId = (el.className + " " + el.id).toLowerCase();
@@ -110,6 +111,9 @@ class DOMScanner {
       case "FIGCAPTION":
         return "caption";
       case "SECTION":
+      case "ARTICLE":
+      case "ASIDE":
+        if (el.querySelector(BLOCK_CHILD_SELECTORS)) return null;
         return "paragraph";
       case "BLOCKQUOTE":
         return "paragraph";
@@ -136,10 +140,9 @@ class DOMScanner {
       }
       default: {
         if (tag === "PRE") {
-          const codeChild = el.querySelector("code");
-          return codeChild ? "code_block" : null;
+          return "code_block";
         }
-        if (tag === "DIV" && this.containsTextNode(el)) {
+        if (tag === "DIV" && this.containsTextNode(el) && !el.querySelector(BLOCK_CHILD_SELECTORS)) {
           return "paragraph";
         }
         if (el.classList.contains("caption")) {
@@ -156,6 +159,34 @@ class DOMScanner {
     const clone = el.cloneNode(true);
     clone.querySelectorAll("script, style").forEach((n) => n.remove());
     return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+  }
+  /**
+   * 提取代码块中的注释行, 代码逻辑不翻译
+   */
+  extractCodeComments(el) {
+    const code = el.textContent ?? "";
+    const lines = code.split("\n");
+    const comments = [];
+    let inBlockComment = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (inBlockComment) {
+        comments.push(line);
+        if (trimmed.includes("*/")) inBlockComment = false;
+        continue;
+      }
+      if (trimmed.startsWith("#")) {
+        comments.push(line);
+      } else if (trimmed.startsWith("//")) {
+        comments.push(line);
+      } else if (trimmed.startsWith("/*") || trimmed.includes("/*")) {
+        comments.push(line);
+        if (!trimmed.includes("*/")) inBlockComment = true;
+      } else if (trimmed.startsWith("*") && !trimmed.startsWith("**/")) {
+        comments.push(line);
+      }
+    }
+    return comments.join("\n");
   }
   /**
    * 验证文本是否有效：非空、长度足够、非纯数字/符号
@@ -313,8 +344,8 @@ class UnitBuilder {
   }
 }
 const BATCH_DELAY_MS = 100;
-const CONCURRENT_BATCHES = 3;
-const MESSAGE_TIMEOUT_MS = 8e3;
+const CONCURRENT_BATCHES = 1;
+const MESSAGE_TIMEOUT_MS = 3e4;
 class TranslationQueue {
   constructor(callbacks) {
     this.isRunning = false;
@@ -373,48 +404,32 @@ class TranslationQueue {
   }
   /**
    * 处理单个批次的翻译流程
+   * 缓存由 background SW 的 TRANSLATE handler 内部处理，不单独逐条查询
    */
   async processBatch(batch, batchIndex) {
     try {
-      const cached = [];
-      const uncached = [];
-      for (const unit of batch) {
-        const hash = await hashText(unit.originalText);
-        const cacheRsp = await this.sendMessage({
-          type: "GET_CACHE",
-          payload: { originalHash: hash }
-        });
-        if (cacheRsp?.translatedText) {
-          cached.push({ id: unit.id, translatedText: cacheRsp.translatedText });
-        } else {
-          uncached.push(unit);
+      const response = await this.sendMessage({
+        type: "TRANSLATE",
+        payload: {
+          units: batch.map((u) => ({
+            id: u.id,
+            text: u.originalText,
+            contextChain: u.contextChain
+          })),
+          glossary: {},
+          targetLang: "zh-CN"
         }
+      });
+      if (!response || !response.success) {
+        throw new Error(response?.error ?? "翻译失败");
       }
-      if (uncached.length > 0) {
-        const response = await this.sendMessage({
-          type: "TRANSLATE",
-          payload: {
-            units: uncached.map((u) => ({
-              id: u.id,
-              text: u.originalText,
-              contextChain: u.contextChain
-            })),
-            glossary: {},
-            targetLang: "zh-CN"
-          }
-        });
-        if (!response || !response.success) {
-          throw new Error(response?.error ?? "翻译失败");
-        }
-        const translated = response.data ?? [];
-        if (translated.length === 0) {
-          console.warn(`[DocBridge] 批次 ${batchIndex + 1}: API 返回 0 条翻译结果`);
-        } else {
-          console.log(`[DocBridge] 批次 ${batchIndex + 1} 收到翻译结果:`, translated.length, "条");
-        }
-        cached.push(...translated);
+      const translated = response.data ?? [];
+      if (translated.length === 0) {
+        console.warn(`[DocBridge] 批次 ${batchIndex + 1}: API 返回 0 条翻译结果`);
+      } else {
+        console.log(`[DocBridge] 批次 ${batchIndex + 1} 收到翻译结果:`, translated.length, "条");
       }
-      return cached;
+      return translated;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       if (error.message.includes("Extension context invalidated") || error.message.includes("扩展上下文已失效")) {
@@ -459,227 +474,214 @@ class TranslationQueue {
     });
   }
 }
-async function hashText(text) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(text);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-const DT_BRIDGE_CLASS = "dt-bridge";
-const DT_LABEL_CLASS = "dt-label";
-const DT_TEXT_CLASS = "dt-text";
-const DT_ID_ATTR = "data-dt-id";
-const MODE_CLASS_MAP = {
-  "bilingual": "dt-mode-bilingual",
-  "translated-only": "dt-mode-translated-only",
-  "original-only": "dt-mode-original-only"
-};
+const MODE_PREFIX = "dt-mode";
 const STYLE_ID = "docbridge-renderer-styles";
 class DOMRenderer {
   constructor() {
     this.currentMode = "bilingual";
     this.injectStyles();
-    this.setMode(this.currentMode);
   }
+  // ======================== 公开 API ========================
   /**
-   * 渲染译文：在每个单元元素内部插入 dt-bridge 节点（作为第一个子节点）
+   * 渲染译文：包裹直接文本节点便于 CSS 控制 + 追加 .dt-bridge 到尾
+   * 不动任何子元素，不修改任何文本节点内容
    */
   render(units) {
-    console.log("[DocBridge] DOMRenderer.render 收到", units.length, "个译文单元");
-    let skipped = 0;
     let rendered = 0;
     for (const unit of units) {
       try {
-        const result = this.renderOne(unit);
-        if (result === "skipped") skipped++;
-        else if (result === "rendered") rendered++;
+        if (this.renderOne(unit)) rendered++;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(`[DocBridge] 渲染单元 ${unit.id} 失败:`, msg);
       }
     }
-    console.log(`[DocBridge] 渲染完成: ${rendered} 个已渲染, ${skipped} 个跳过`);
+    if (rendered > 0) {
+      document.body.classList.add(`${MODE_PREFIX}-bilingual`);
+    }
+    console.log(`[DocBridge] 渲染完成: ${rendered} 个`);
   }
   /**
-   * 切换显示模式（通过 body class + CSS，不重新操作 DOM）
+   * 切换显示模式：仅操作 body class，CSS 自动控制文本节点和 bridge 的显隐
+   * 三种模式切换不调用 API、不重新扫描、不修改任何文本节点
    */
   setMode(mode) {
-    for (const cls of Object.values(MODE_CLASS_MAP)) {
-      document.body.classList.remove(cls);
-    }
-    document.body.classList.add(MODE_CLASS_MAP[mode]);
     this.currentMode = mode;
+    document.body.classList.remove(
+      `${MODE_PREFIX}-bilingual`,
+      `${MODE_PREFIX}-translated-only`,
+      `${MODE_PREFIX}-original-only`
+    );
+    document.body.classList.add(`${MODE_PREFIX}-${mode}`);
   }
-  /**
-   * 获取当前显示模式
-   */
   getMode() {
     return this.currentMode;
   }
   /**
-   * 清除所有译文节点和标记（确保可重新翻译）
+   * 清除所有：解包 .dt-text-node → 移除 .dt-bridge → 清除属性
+   * 完全恢复到翻译前的 DOM 结构
    */
   clear() {
-    document.querySelectorAll(`.${DT_BRIDGE_CLASS}`).forEach((el) => el.remove());
-    document.querySelectorAll("[data-dt-processed], [data-dt-translated]").forEach((el) => {
-      el.removeAttribute("data-dt-processed");
-      el.removeAttribute("data-dt-translated");
+    document.querySelectorAll("[data-dt-translated]").forEach((el) => {
+      const htmlEl = el;
+      const wrappers = htmlEl.querySelectorAll(".dt-text-node");
+      for (let i = wrappers.length - 1; i >= 0; i--) {
+        const wrapper = wrappers[i];
+        while (wrapper.firstChild) {
+          wrapper.parentNode.insertBefore(wrapper.firstChild, wrapper);
+        }
+        wrapper.remove();
+      }
+      const bridge = htmlEl.querySelector(".dt-bridge");
+      if (bridge) bridge.remove();
+      htmlEl.removeAttribute("data-dt-translated");
+      htmlEl.removeAttribute("data-dt-id");
+      htmlEl.removeAttribute("data-dt-original-text");
+      htmlEl.removeAttribute("data-dt-translated-text");
     });
-    for (const cls of Object.values(MODE_CLASS_MAP)) {
-      document.body.classList.remove(cls);
-    }
+    document.querySelectorAll("[data-dt-processed]").forEach((el) => {
+      el.removeAttribute("data-dt-processed");
+    });
+    document.body.classList.remove(
+      `${MODE_PREFIX}-bilingual`,
+      `${MODE_PREFIX}-translated-only`,
+      `${MODE_PREFIX}-original-only`
+    );
   }
   /**
-   * 导出译文页面为 HTML 文件
-   * 克隆当前 DOM，移除内部属性，保留译文文本，触发下载
+   * 导出译文页面（仅译文模式效果）
    */
   exportHTML() {
     try {
       const clone = document.documentElement.cloneNode(true);
-      clone.querySelectorAll(".dt-bridge").forEach((el) => {
-        el.removeAttribute("data-dt-id");
-        el.removeAttribute("title");
+      clone.querySelectorAll("[data-dt-translated]").forEach((el) => {
+        const htmlEl = el;
+        const bridge = htmlEl.querySelector(".dt-bridge");
+        if (bridge) bridge.remove();
+        const transText = htmlEl.getAttribute("data-dt-translated-text");
+        if (transText) {
+          htmlEl.textContent = transText;
+        }
+        htmlEl.removeAttribute("data-dt-translated");
+        htmlEl.removeAttribute("data-dt-id");
+        htmlEl.removeAttribute("data-dt-original-text");
+        htmlEl.removeAttribute("data-dt-translated-text");
       });
-      clone.querySelectorAll("[data-dt-processed], [data-dt-translated]").forEach((el) => {
+      clone.querySelectorAll("[data-dt-processed]").forEach((el) => {
         el.removeAttribute("data-dt-processed");
-        el.removeAttribute("data-dt-translated");
       });
       const bar = clone.querySelector("#docbridge-floating-bar");
       if (bar) bar.remove();
-      const style = clone.querySelector(`#${STYLE_ID}`);
-      if (style) style.remove();
       const html = "<!DOCTYPE html>\n" + clone.outerHTML;
       const blob = new Blob([html], { type: "text/html;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "translated-page.html";
+      const safeName = document.title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, "_").slice(0, 80);
+      a.download = `translated-${safeName || "page"}.html`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      console.log("[DocBridge] 页面已导出为 translated-page.html");
+      setTimeout(() => URL.revokeObjectURL(url), 5e3);
+      console.log("[DocBridge] 页面已导出");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[DocBridge] 导出失败:", msg);
     }
   }
-  // ---------- 私有方法 ----------
+  // ======================== 私有：渲染单个单元 ========================
   /**
-   * 渲染单个译文单元
-   * 将 bridge 插入为第一个子节点（便于仅译文模式 absolute 覆盖）
+   * 渲染单个单元：
+   * 1. 每个直接文本节点用 <span class="dt-text-node"> 包裹（CSS 控制显隐，inline 无布局影响）
+   * 2. 设置 data-dt-original-text / data-dt-translated-text 属性（数据层）
+   * 3. 追加 .dt-bridge 到最后（唯一新增的可见节点）
+   * 不移动任何子元素，不修改任何文本内容
    */
   renderOne(unit) {
-    if (!unit.originalUnit) {
-      return "skipped";
-    }
+    if (!unit.originalUnit) return false;
     const el = unit.originalUnit.element;
-    if (!el || !document.contains(el)) {
-      return "skipped";
+    if (!el || !document.contains(el)) return false;
+    if (el.hasAttribute("data-dt-translated")) return false;
+    if (el.querySelector("[data-dt-translated]")) return false;
+    if (el.querySelector(".dt-bridge")) return false;
+    if (unit.originalUnit.type === "code_block") {
+      return this.markOnly(el, unit);
     }
-    if (el.hasAttribute("data-dt-translated")) {
-      return "skipped";
+    for (const child of Array.from(el.childNodes)) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const wrapper = document.createElement("span");
+        wrapper.className = "dt-text-node";
+        wrapper.style.cssText = "";
+        el.insertBefore(wrapper, child);
+        wrapper.appendChild(child);
+      }
     }
-    const wrapper = this.buildBridge(unit);
-    if (el.firstChild) {
-      el.insertBefore(wrapper, el.firstChild);
-    } else {
-      el.appendChild(wrapper);
-    }
+    el.setAttribute("data-dt-original-text", el.textContent || "");
+    el.setAttribute("data-dt-translated-text", unit.translatedText);
+    const bridge = document.createElement("span");
+    bridge.className = "dt-bridge";
+    bridge.setAttribute("data-dt-id", unit.id);
+    bridge.textContent = unit.translatedText;
+    bridge.title = unit.translatedText;
+    el.appendChild(bridge);
     el.setAttribute("data-dt-translated", "true");
-    return "rendered";
+    el.setAttribute("data-dt-id", unit.id);
+    return true;
   }
   /**
-   * 构建 dt-bridge 译文节点（原生 title + 自动换行）
+   * 仅标记（代码块）：不修改任何 DOM 内容
    */
-  buildBridge(unit) {
-    const wrapper = document.createElement("span");
-    wrapper.className = DT_BRIDGE_CLASS;
-    wrapper.setAttribute(DT_ID_ATTR, unit.id);
-    wrapper.title = unit.translatedText;
-    wrapper.style.cssText = [
-      "display:block",
-      "margin-top:4px",
-      "padding:4px 0",
-      "border-left:3px solid #1890ff",
-      "padding-left:8px",
-      "white-space:normal",
-      "word-break:break-word",
-      "overflow-wrap:break-word",
-      "position:relative",
-      "z-index:1"
-    ].join(";");
-    if (unit.originalUnit?.type === "code_block") {
-      wrapper.style.fontFamily = "monospace";
-      wrapper.style.backgroundColor = "#f6f8fa";
-      wrapper.style.borderRadius = "4px";
-    }
-    if (unit.originalUnit?.element) {
-      const parentStyle = window.getComputedStyle(unit.originalUnit.element);
-      wrapper.style.fontSize = parentStyle.fontSize;
-      wrapper.style.fontFamily = parentStyle.fontFamily;
-      wrapper.style.lineHeight = parentStyle.lineHeight;
-      wrapper.style.fontWeight = parentStyle.fontWeight;
-    }
-    const label = document.createElement("span");
-    label.className = DT_LABEL_CLASS;
-    label.style.cssText = "color:#999;font-size:0.85em;margin-right:4px;";
-    label.textContent = "[译]";
-    const text = document.createElement("span");
-    text.className = DT_TEXT_CLASS;
-    text.style.cssText = "color:#333;";
-    text.textContent = unit.translatedText;
-    wrapper.appendChild(label);
-    wrapper.appendChild(text);
-    return wrapper;
+  markOnly(el, unit) {
+    el.setAttribute("data-dt-translated", "true");
+    el.setAttribute("data-dt-id", unit.id);
+    return true;
   }
-  /**
-   * 注入显示模式控制的 CSS 样式
-   * 仅译文模式：原文 visibility:hidden，译文 absolute 覆盖
-   */
+  // ======================== 私有：样式注入 ========================
   injectStyles() {
     if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      /* 双语模式：译文正常流 */
-      .dt-mode-bilingual .${DT_BRIDGE_CLASS} {
-        position: relative !important;
-        display: block !important;
-      }
+      /* .dt-text-node 是 inline span，包裹原文本节点，默认不影响布局 */
+      .dt-text-node { }
 
-      /* 仅译文模式：原文隐藏占位，译文 absolute 覆盖 */
-      .dt-mode-translated-only [data-dt-translated] {
-        visibility: hidden;
-        position: relative;
-      }
-      .dt-mode-translated-only [data-dt-translated] > .${DT_BRIDGE_CLASS} {
-        visibility: visible;
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        margin: 0 !important;
-        padding: 0 !important;
-        border: none !important;
-        background: transparent;
-        color: inherit;
-        z-index: 1;
-        display: flex;
-        align-items: center;
+      /* 译文桥接节点基础样式 */
+      .dt-bridge {
+        display: block;
+        margin-top: 4px;
+        padding: 4px 0;
+        border-left: 3px solid #1890ff;
+        padding-left: 8px;
+        color: #333;
         white-space: normal;
         word-break: break-word;
+        overflow-wrap: break-word;
       }
 
-      /* 仅原文模式：隐藏译文 */
-      .dt-mode-original-only .${DT_BRIDGE_CLASS} {
-        display: none !important;
+      /* ===== 双语模式：原文原位 + 译文蓝框 ===== */
+      .dt-mode-bilingual .dt-text-node { /* visible */ }
+      .dt-mode-bilingual .dt-bridge { display: block; }
+
+      /* ===== 仅译文模式：隐藏原文文本，只显示译文 ===== */
+      .dt-mode-translated-only .dt-text-node { display: none; }
+      .dt-mode-translated-only .dt-bridge {
+        display: block;
+        /* 类 Chrome 内置翻译：无蓝框标记，纯文本 */
+        border-left: none !important;
+        padding-left: 0 !important;
+        background: none !important;
+        margin-top: 0;
+        padding-top: 0;
+        padding-bottom: 0;
+        color: inherit;
       }
+
+      /* ===== 仅原文模式：隐藏译文 ===== */
+      .dt-mode-original-only .dt-text-node { /* visible */ }
+      .dt-mode-original-only .dt-bridge { display: none; }
     `;
     document.head.appendChild(style);
   }
@@ -689,16 +691,11 @@ let observer = null;
 let lastUrl = location.href;
 let translateTimer = null;
 let isTranslating = false;
+let isRestoring = false;
 (function init() {
-  const startDelay = 500;
-  if (document.readyState === "complete") {
-    setTimeout(() => translatePage(), startDelay);
-  } else {
-    window.addEventListener("load", () => setTimeout(() => translatePage(), startDelay));
-  }
   setupMessageListener();
   setupMutationObserver();
-  injectFloatingBar();
+  ensureFloatingBar();
 })();
 async function translatePage() {
   if (isTranslating) return;
@@ -733,7 +730,7 @@ async function translatePage() {
         if (renderer) renderer.render(results);
         console.log(`[DocBridge] 翻译完成: ${results.length} 个单元已渲染`);
         isTranslating = false;
-        connectObserver();
+        setTimeout(connectObserver, 500);
       },
       onError: (err) => {
         console.error("[DocBridge] 翻译错误:", err.message);
@@ -749,24 +746,8 @@ async function translatePage() {
   }
 }
 function setupMutationObserver() {
-  observer = new MutationObserver((mutations) => {
-    let allBridgeRelated = true;
-    for (const mutation of mutations) {
-      for (let i = 0; i < mutation.addedNodes.length; i++) {
-        const node = mutation.addedNodes[i];
-        if (node.nodeType !== Node.ELEMENT_NODE) {
-          allBridgeRelated = false;
-          break;
-        }
-        const el = node;
-        if (!el.classList.contains("dt-bridge") && !el.closest(".dt-bridge") && !el.hasAttribute("data-dt-translated") && !el.hasAttribute("data-dt-id")) {
-          allBridgeRelated = false;
-          break;
-        }
-      }
-      if (!allBridgeRelated) break;
-    }
-    if (allBridgeRelated) return;
+  observer = new MutationObserver(() => {
+    if (isRestoring) return;
     if (translateTimer) clearTimeout(translateTimer);
     translateTimer = setTimeout(() => {
       const currentUrl = location.href;
@@ -777,7 +758,7 @@ function setupMutationObserver() {
         return;
       }
       const unprocessed = document.querySelectorAll(
-        "p:not([data-dt-processed]), h1:not([data-dt-processed]), h2:not([data-dt-processed]), h3:not([data-dt-processed]), li:not([data-dt-processed]), td:not([data-dt-processed])"
+        "p:not([data-dt-processed]):not([data-dt-translated]), h1:not([data-dt-processed]):not([data-dt-translated]), h2:not([data-dt-processed]):not([data-dt-translated]), h3:not([data-dt-processed]):not([data-dt-translated]), li:not([data-dt-processed]):not([data-dt-translated]), td:not([data-dt-processed]):not([data-dt-translated])"
       );
       if (unprocessed.length > 5) {
         translatePage();
@@ -801,14 +782,26 @@ function setupMessageListener() {
     try {
       switch (message.type) {
         case "TOGGLE_DISPLAY": {
-          const { mode } = message.payload;
+          const mode = message.payload;
           if (renderer) {
+            disconnectObserver();
+            if (translateTimer) {
+              clearTimeout(translateTimer);
+              translateTimer = null;
+            }
+            isRestoring = true;
             renderer.setMode(mode);
+            setTimeout(() => {
+              isRestoring = false;
+              connectObserver();
+            }, 300);
           }
           sendResponse({ success: true });
           break;
         }
         case "START_TRANSLATE": {
+          disconnectObserver();
+          renderer?.clear();
           translatePage();
           sendResponse({ success: true });
           break;
@@ -833,6 +826,10 @@ function setupMessageListener() {
     return true;
   });
 }
+function ensureFloatingBar() {
+  if (document.getElementById("docbridge-floating-bar")) return;
+  injectFloatingBar();
+}
 function injectFloatingBar() {
   const bar = document.createElement("div");
   bar.id = "docbridge-floating-bar";
@@ -851,24 +848,51 @@ function injectFloatingBar() {
     "font-family:sans-serif",
     "font-size:13px"
   ].join(";");
-  bar.appendChild(createBtn("翻译", () => {
-    renderer?.clear();
-    translatePage();
-  }, "#1890ff", "#fff"));
-  bar.appendChild(createBtn("还原", () => renderer?.clear(), "#595959", "#fff"));
+  function safeAction(action, reconnectDelay = 300) {
+    disconnectObserver();
+    if (translateTimer) {
+      clearTimeout(translateTimer);
+      translateTimer = null;
+    }
+    isRestoring = true;
+    action();
+    setTimeout(() => {
+      isRestoring = false;
+      connectObserver();
+    }, reconnectDelay);
+  }
+  bar.appendChild(createBtn("还原", () => {
+    safeAction(() => {
+      renderer?.clear();
+    }, 300);
+  }, "#595959", "#fff"));
+  bar.appendChild(createSep());
+  bar.appendChild(createBtn("双语", () => {
+    safeAction(() => {
+      renderer?.setMode("bilingual");
+    }, 200);
+  }, "#52c41a", "#fff"));
+  bar.appendChild(createBtn("仅译文", () => {
+    safeAction(() => {
+      renderer?.setMode("translated-only");
+    }, 200);
+  }, "#faad14", "#fff"));
+  bar.appendChild(createBtn("仅原文", () => {
+    safeAction(() => {
+      renderer?.setMode("original-only");
+    }, 200);
+  }, "#d9d9d9", "#333"));
+  bar.appendChild(createSep());
+  bar.appendChild(createBtn("导出", () => {
+    renderer?.exportHTML();
+  }, "#722ed1", "#fff"));
+  document.body.appendChild(bar);
+}
+function createSep() {
   const sep = document.createElement("span");
   sep.style.cssText = "color:#d9d9d9;line-height:28px;";
   sep.textContent = "|";
-  bar.appendChild(sep);
-  bar.appendChild(createBtn("双语", () => renderer?.setMode("bilingual"), "#52c41a", "#fff"));
-  bar.appendChild(createBtn("仅译文", () => renderer?.setMode("translated-only"), "#faad14", "#fff"));
-  bar.appendChild(createBtn("仅原文", () => renderer?.setMode("original-only"), "#d9d9d9", "#333"));
-  const sep2 = document.createElement("span");
-  sep2.style.cssText = "color:#d9d9d9;line-height:28px;";
-  sep2.textContent = "|";
-  bar.appendChild(sep2);
-  bar.appendChild(createBtn("导出", () => renderer?.exportHTML(), "#722ed1", "#fff"));
-  document.body.appendChild(bar);
+  return sep;
 }
 function createBtn(text, onClick, bgColor, color) {
   const btn = document.createElement("button");

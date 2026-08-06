@@ -199,20 +199,20 @@ async function handleMessage(
     }
 
     case 'TOGGLE_DISPLAY': {
-      const { mode } = message.payload as { mode: DisplayMode };
+      const mode = message.payload as DisplayMode;
       const tabs = await chrome.tabs.query({});
       for (const tab of tabs) {
         if (tab.id == null) continue;
         try {
           await chrome.tabs.sendMessage(tab.id, {
             type: 'TOGGLE_DISPLAY',
-            payload: { mode },
+            payload: mode,
           } satisfies DTMessage);
         } catch {
           // 某些 tab 可能没有注入 content script，忽略
         }
       }
-      return { success: true, mode };
+      return { success: true };
     }
 
     default:
