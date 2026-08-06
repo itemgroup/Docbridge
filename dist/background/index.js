@@ -1,12 +1,4 @@
-const DEEPSEEK_API_CONFIG = {
-  baseURL: "https://api.deepseek.com/v1",
-  model: "deepseek-chat",
-  temperature: 0.3,
-  max_tokens: 4096,
-  timeout: 1e4
-};
-const MAX_RETRIES = 3;
-const RETRY_BASE_DELAY_MS = 1e3;
+import { D as DEEPSEEK_API_CONFIG, M as MAX_RETRIES, R as RETRY_BASE_DELAY_MS } from "../chunks/constants-CoCYY9Y6.js";
 const SYSTEM_PROMPT = `你是一位专业的技术文档翻译专家，将用户提供的英文技术文档内容翻译为简体中文。
 【核心规则】
 信：忠实原文技术含义；达：译文通顺易懂；雅：符合中文技术文档表达习惯

@@ -81,8 +81,8 @@ export class DOMRenderer {
    */
   private renderOne(unit: TranslatedUnit): void {
     const el = unit.originalUnit.element;
-    // 元素已不在 DOM 中，跳过
-    if (!document.contains(el)) return;
+    // 元素引用为空或已不在 DOM 中，跳过
+    if (!el || !document.contains(el)) return;
     // 已翻译过的跳过
     if (el.hasAttribute('data-dt-translated')) return;
 

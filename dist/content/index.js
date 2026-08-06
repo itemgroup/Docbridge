@@ -1,2 +1,704 @@
-
+import { a as DT_BRIDGE_CLASS, b as DT_ID_ATTR, c as DT_LABEL_CLASS, d as DT_TEXT_CLASS } from "../chunks/constants-CoCYY9Y6.js";
+const MAIN_SELECTORS = [
+  "article",
+  "main",
+  '[role="main"]',
+  ".content",
+  ".documentation",
+  ".markdown-body",
+  ".post-content",
+  ".article-content",
+  ".entry-content"
+];
+const EXCLUDE_SELECTORS = [
+  "nav",
+  "header",
+  "footer",
+  "aside",
+  '[role="banner"]',
+  '[role="complementary"]',
+  '[role="navigation"]',
+  ".sidebar",
+  ".nav",
+  ".menu",
+  ".advertisement",
+  ".cookie-banner",
+  ".announcement"
+];
+const EXCLUDE_KEYWORDS = ["nav", "footer", "sidebar", "ad-", "cookie", "comment"];
+const INLINE_TAGS = /* @__PURE__ */ new Set(["A", "CODE", "STRONG", "EM", "SPAN", "B", "I", "U", "SMALL", "MARK", "SUB", "SUP"]);
+const SKIP_TAGS = /* @__PURE__ */ new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "INPUT", "TEXTAREA", "SELECT", "BUTTON", "BR", "HR"]);
+const MIN_TEXT_LENGTH = 3;
+class DOMScanner {
+  /**
+   * 扫描页面 DOM，生成 TranslationUnit 列表
+   * @param root - 可选根元素，不传则自动定位主内容区
+   */
+  scan(root) {
+    const container = root ?? this.findMainContent();
+    const units = [];
+    this.walk(container, units, null);
+    return units;
+  }
+  /**
+   * 定位主内容区：按优先选择器查找，未找到则回退 body 并排除非内容区
+   */
+  findMainContent() {
+    for (const sel of MAIN_SELECTORS) {
+      const el = document.querySelector(sel);
+      if (el instanceof HTMLElement) return el;
+    }
+    const body = document.body;
+    const clone = body.cloneNode(true);
+    EXCLUDE_SELECTORS.forEach((sel) => {
+      clone.querySelectorAll(sel).forEach((e) => e.remove());
+    });
+    return body;
+  }
+  /**
+   * 递归遍历 DOM 树，对符合条件的节点生成 TranslationUnit
+   * @param el - 当前元素
+   * @param units - 收集结果
+   * @param parentHeading - 向上找到的最近标题文本
+   */
+  walk(el, units, parentHeading) {
+    if (this.shouldSkip(el)) return;
+    const tag = el.tagName.toUpperCase();
+    const unitType = this.getElementType(tag, el);
+    if (unitType !== null) {
+      const text = this.extractText(el);
+      if (this.isValidText(text)) {
+        const heading = unitType === "heading" ? text : this.findNearestHeading(el);
+        const contextChain = heading ? [heading] : [];
+        units.push(this.buildUnit(el, unitType, text, contextChain));
+        el.setAttribute("data-dt-processed", "true");
+      }
+    }
+    const headingForChildren = unitType === "heading" ? this.extractText(el) : parentHeading;
+    for (let i = 0; i < el.children.length; i++) {
+      const child = el.children[i];
+      if (child instanceof HTMLElement) {
+        this.walk(child, units, headingForChildren);
+      }
+    }
+  }
+  /**
+   * 判断元素是否应跳过
+   */
+  shouldSkip(el) {
+    if (el.hasAttribute("data-dt-processed")) return true;
+    if (SKIP_TAGS.has(el.tagName.toUpperCase())) return true;
+    const classAndId = (el.className + " " + el.id).toLowerCase();
+    if (EXCLUDE_KEYWORDS.some((kw) => classAndId.includes(kw))) return true;
+    return false;
+  }
+  /**
+   * 根据标签和 DOM 位置判断翻译单元类型
+   * 行内元素返回 null（不作为独立单元）
+   */
+  getElementType(tag, el) {
+    switch (tag) {
+      case "H1":
+      case "H2":
+      case "H3":
+      case "H4":
+      case "H5":
+      case "H6":
+        return "heading";
+      case "P":
+        return "paragraph";
+      case "LI":
+        return "list_item";
+      case "TD":
+      case "TH":
+        return "table_cell";
+      case "FIGCAPTION":
+        return "caption";
+      default: {
+        if (tag === "PRE") {
+          const codeChild = el.querySelector("code");
+          return codeChild ? "code_block" : null;
+        }
+        if (tag === "DIV" && this.containsTextNode(el)) {
+          return "paragraph";
+        }
+        if (el.classList.contains("caption")) {
+          return "caption";
+        }
+        if (INLINE_TAGS.has(tag)) return null;
+        return null;
+      }
+    }
+  }
+  /**
+   * 提取元素纯文本，排除 script/style 子节点
+   */
+  extractText(el) {
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll("script, style").forEach((n) => n.remove());
+    return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+  }
+  /**
+   * 验证文本是否有效：非空、长度足够、非纯数字/符号
+   */
+  isValidText(text) {
+    if (text.length < MIN_TEXT_LENGTH) return false;
+    if (/^[\d\s.,;:!?@#$%^&*()_+\-=[\]{}|/\\<>~`'"\u00A0-\u00FF]+$/.test(text)) return false;
+    return true;
+  }
+  /**
+   * 向上查找最近的 h1-h6 标题文本
+   */
+  findNearestHeading(el) {
+    let current = el.parentElement;
+    while (current) {
+      const tag = current.tagName.toUpperCase();
+      if (/^H[1-6]$/.test(tag)) {
+        return (current.textContent ?? "").trim();
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+  /**
+   * 检查 div 元素内部是否包含纯文本节点
+   */
+  containsTextNode(el) {
+    for (let i = 0; i < el.childNodes.length; i++) {
+      const node = el.childNodes[i];
+      if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * 构建 TranslationUnit 对象
+   */
+  buildUnit(el, type, text, contextChain) {
+    return {
+      id: "u_" + Math.random().toString(36).substring(2, 11),
+      type,
+      element: el,
+      originalText: text,
+      htmlContext: el.innerHTML.trim(),
+      contextChain,
+      isInShadowDOM: el.getRootNode() instanceof ShadowRoot,
+      isInIframe: window.self !== window.top,
+      // 视口内优先级更高
+      priority: el.getBoundingClientRect().top < window.innerHeight ? 10 : 5
+    };
+  }
+}
+const CONTEXT_PREVIEW_LENGTH = 50;
+const BATCH_SIZE = 10;
+class UnitBuilder {
+  /**
+   * 接收 DOMScanner 产出的 TranslationUnit[]，进行上下文增强、过滤、排序和分批
+   * @returns 按批次分组的 TranslationUnit[][]
+   */
+  build(units) {
+    const filtered = units.filter((u) => {
+      if (u.originalText.trim().length === 0) return false;
+      if (u.element.hasAttribute("data-dt-translated")) return false;
+      return true;
+    });
+    filtered.sort((a, b) => b.priority - a.priority);
+    for (const unit of filtered) {
+      unit.contextChain = this.buildContextChain(unit, filtered);
+    }
+    return this.groupIntoBatches(filtered);
+  }
+  /**
+   * 构建上下文链：[章节标题, 前文摘要1, 前文摘要2]
+   */
+  buildContextChain(unit, allUnits) {
+    const chain = [];
+    const heading = this.findHeadingForUnit(unit);
+    if (heading) {
+      chain.push(heading);
+    }
+    const siblingContexts = this.getSiblingContexts(unit, allUnits);
+    for (const ctx of siblingContexts) {
+      chain.push(this.truncate(ctx, CONTEXT_PREVIEW_LENGTH));
+    }
+    return chain;
+  }
+  /**
+   * 向上查找单元对应的最近标题
+   */
+  findHeadingForUnit(unit) {
+    let el = unit.element.parentElement;
+    while (el) {
+      if (/^H[1-6]$/.test(el.tagName)) {
+        return (el.textContent ?? "").replace(/\s+/g, " ").trim();
+      }
+      el = el.parentElement;
+    }
+    return null;
+  }
+  /**
+   * 获取同父元素下该单元之前的最近两个相邻单元的 originalText
+   */
+  getSiblingContexts(unit, allUnits) {
+    const parent = unit.element.parentElement;
+    if (!parent) return [];
+    const siblings = allUnits.filter(
+      (u) => u.element.parentElement === parent && u.id !== unit.id
+    );
+    const children = Array.from(parent.children);
+    const currentIndex = children.indexOf(unit.element);
+    if (currentIndex === -1) return [];
+    const beforeSiblings = siblings.filter((u) => {
+      const idx = children.indexOf(u.element);
+      return idx !== -1 && idx < currentIndex;
+    });
+    beforeSiblings.sort((a, b) => {
+      return children.indexOf(b.element) - children.indexOf(a.element);
+    });
+    return beforeSiblings.slice(0, 2).map((u) => u.originalText);
+  }
+  /**
+   * 截断文本到指定长度
+   */
+  truncate(text, maxLen) {
+    if (text.length <= maxLen) return text;
+    return text.slice(0, maxLen) + "...";
+  }
+  /**
+   * 按批次分组：同 heading 的单元尽量同批次，每批不超过 BATCH_SIZE
+   */
+  groupIntoBatches(units) {
+    if (units.length === 0) return [];
+    const headingBuckets = /* @__PURE__ */ new Map();
+    const noHeadingUnits = [];
+    for (const unit of units) {
+      const heading = unit.contextChain[0] ?? "";
+      if (heading) {
+        const existing = headingBuckets.get(heading);
+        if (existing) {
+          existing.push(unit);
+        } else {
+          headingBuckets.set(heading, [unit]);
+        }
+      } else {
+        noHeadingUnits.push(unit);
+      }
+    }
+    const batches = [];
+    for (const bucket of headingBuckets.values()) {
+      let current2 = [];
+      for (const unit of bucket) {
+        current2.push(unit);
+        if (current2.length >= BATCH_SIZE) {
+          batches.push(current2);
+          current2 = [];
+        }
+      }
+      if (current2.length > 0) {
+        batches.push(current2);
+      }
+    }
+    let current = [];
+    for (const unit of noHeadingUnits) {
+      current.push(unit);
+      if (current.length >= BATCH_SIZE) {
+        batches.push(current);
+        current = [];
+      }
+    }
+    if (current.length > 0) {
+      batches.push(current);
+    }
+    return batches;
+  }
+}
+const BATCH_DELAY_MS = 300;
+class TranslationQueue {
+  constructor(callbacks) {
+    this.pendingResolver = null;
+    this.listenerRegistered = false;
+    this.handleMessage = (message) => {
+      if (message.type === "TRANSLATE_RESULT" && this.pendingResolver) {
+        const { results } = message.payload;
+        this.pendingResolver(results);
+      }
+    };
+    this.onProgress = callbacks.onProgress;
+    this.onComplete = callbacks.onComplete;
+    this.onError = callbacks.onError;
+    this.registerListener();
+  }
+  /**
+   * 启动翻译：逐批次发送、等待结果、上报进度
+   */
+  async start(batches) {
+    const allResults = [];
+    let totalUnits = 0;
+    for (const batch of batches) totalUnits += batch.length;
+    let translatedCount = 0;
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      try {
+        const cached = [];
+        const uncached = [];
+        for (const unit of batch) {
+          const hash = await hashText(unit.originalText);
+          const cacheRsp = await chrome.runtime.sendMessage({
+            type: "GET_CACHE",
+            payload: { originalHash: hash }
+          });
+          if (cacheRsp?.translatedText) {
+            cached.push({ id: unit.id, translatedText: cacheRsp.translatedText });
+          } else {
+            uncached.push(unit);
+          }
+        }
+        if (uncached.length > 0) {
+          const translatePromise = new Promise((resolve) => {
+            this.pendingResolver = resolve;
+          });
+          await chrome.runtime.sendMessage({
+            type: "TRANSLATE",
+            payload: {
+              units: uncached.map((u) => ({
+                id: u.id,
+                text: u.originalText,
+                contextChain: u.contextChain
+              })),
+              glossary: {},
+              targetLang: "zh-CN"
+            }
+          });
+          const translated = await translatePromise;
+          cached.push(...translated);
+          this.pendingResolver = null;
+        }
+        for (const r of cached) {
+          const original = batch.find((u) => u.id === r.id);
+          if (original) {
+            allResults.push({
+              id: r.id,
+              translatedText: r.translatedText,
+              originalUnit: original
+            });
+          }
+        }
+        translatedCount += cached.length;
+        this.onProgress(translatedCount, totalUnits);
+        if (i < batches.length - 1) {
+          await sleep(BATCH_DELAY_MS);
+        }
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        console.error(`[DocBridge] 翻译批次 ${i} 失败:`, error.message);
+        this.onError?.(error);
+      }
+    }
+    this.onComplete(allResults);
+  }
+  /** 销毁队列，移除监听 */
+  destroy() {
+    if (this.listenerRegistered) {
+      chrome.runtime.onMessage.removeListener(this.handleMessage);
+      this.listenerRegistered = false;
+    }
+  }
+  /**
+   * 注册 chrome.runtime.onMessage 监听，接收 background 发来的 TRANSLATE_RESULT
+   */
+  registerListener() {
+    if (this.listenerRegistered) return;
+    chrome.runtime.onMessage.addListener(this.handleMessage);
+    this.listenerRegistered = true;
+  }
+}
+async function hashText(text) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(text);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+const MODE_CLASS_MAP = {
+  "bilingual": "dt-mode-bilingual",
+  "translated-only": "dt-mode-translated-only",
+  "original-only": "dt-mode-original-only"
+};
+const STYLE_ID = "docbridge-renderer-styles";
+class DOMRenderer {
+  constructor() {
+    this.currentMode = "bilingual";
+    this.injectStyles();
+    this.setMode(this.currentMode);
+  }
+  /**
+   * 渲染译文：在每个单元元素内部末尾插入 dt-bridge 节点
+   */
+  render(units) {
+    for (const unit of units) {
+      try {
+        this.renderOne(unit);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[DocBridge] 渲染单元 ${unit.id} 失败:`, msg);
+      }
+    }
+  }
+  /**
+   * 切换显示模式（通过 body class，不操作 DOM 元素）
+   */
+  setMode(mode) {
+    for (const cls of Object.values(MODE_CLASS_MAP)) {
+      document.body.classList.remove(cls);
+    }
+    document.body.classList.add(MODE_CLASS_MAP[mode]);
+    this.currentMode = mode;
+  }
+  /**
+   * 获取当前显示模式
+   */
+  getMode() {
+    return this.currentMode;
+  }
+  /**
+   * 清除所有译文节点和标记
+   */
+  clear() {
+    const bridges = document.querySelectorAll(`.${DT_BRIDGE_CLASS}`);
+    bridges.forEach((el) => el.remove());
+    const translated = document.querySelectorAll(`[data-dt-translated]`);
+    translated.forEach((el) => el.removeAttribute("data-dt-translated"));
+    for (const cls of Object.values(MODE_CLASS_MAP)) {
+      document.body.classList.remove(cls);
+    }
+  }
+  // ---------- 私有方法 ----------
+  /**
+   * 渲染单个译文单元
+   */
+  renderOne(unit) {
+    const el = unit.originalUnit.element;
+    if (!el || !document.contains(el)) return;
+    if (el.hasAttribute("data-dt-translated")) return;
+    const wrapper = this.buildBridge(unit);
+    el.appendChild(wrapper);
+    el.setAttribute("data-dt-translated", "true");
+  }
+  /**
+   * 构建 dt-bridge 译文节点
+   */
+  buildBridge(unit) {
+    const wrapper = document.createElement("span");
+    wrapper.className = DT_BRIDGE_CLASS;
+    wrapper.setAttribute(DT_ID_ATTR, unit.id);
+    wrapper.style.cssText = "display:block;margin-top:4px;padding:4px 0;border-left:3px solid #1890ff;padding-left:8px;";
+    if (unit.originalUnit.type === "code_block") {
+      wrapper.style.fontFamily = "monospace";
+      wrapper.style.backgroundColor = "#f6f8fa";
+      wrapper.style.borderRadius = "4px";
+    }
+    const label = document.createElement("span");
+    label.className = DT_LABEL_CLASS;
+    label.style.cssText = "color:#999;font-size:0.85em;margin-right:4px;";
+    label.textContent = "[译]";
+    const text = document.createElement("span");
+    text.className = DT_TEXT_CLASS;
+    text.style.cssText = "color:#333;";
+    text.textContent = unit.translatedText;
+    wrapper.appendChild(label);
+    wrapper.appendChild(text);
+    return wrapper;
+  }
+  /**
+   * 注入显示模式控制的 CSS 样式
+   */
+  injectStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      .dt-mode-translated-only [data-dt-translated] {
+        opacity: 0.15;
+        transition: opacity 0.2s ease;
+      }
+      .dt-mode-translated-only [data-dt-translated]:hover {
+        opacity: 1;
+      }
+      .dt-mode-translated-only .${DT_BRIDGE_CLASS} {
+        opacity: 1 !important;
+      }
+      .dt-mode-original-only .${DT_BRIDGE_CLASS} {
+        display: none !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+}
+let renderer = null;
+let observer = null;
+let lastUrl = location.href;
+let translateTimer = null;
+let isTranslating = false;
+(function init() {
+  const startDelay = 500;
+  if (document.readyState === "complete") {
+    setTimeout(() => translatePage(), startDelay);
+  } else {
+    window.addEventListener("load", () => setTimeout(() => translatePage(), startDelay));
+  }
+  setupMessageListener();
+  setupMutationObserver();
+  injectFloatingBar();
+})();
+async function translatePage() {
+  if (isTranslating) return;
+  isTranslating = true;
+  try {
+    const scanner = new DOMScanner();
+    const units = scanner.scan();
+    const builder = new UnitBuilder();
+    const batches = builder.build(units);
+    if (batches.length === 0) {
+      console.log("[DocBridge] 无可翻译内容");
+      isTranslating = false;
+      return;
+    }
+    if (!renderer) {
+      renderer = new DOMRenderer();
+    }
+    const unitCount = batches.reduce((sum, b) => sum + b.length, 0);
+    console.log(`[DocBridge] 扫描到 ${unitCount} 个翻译单元，${batches.length} 个批次`);
+    disconnectObserver();
+    const queue = new TranslationQueue({
+      onProgress: (done, total) => {
+        console.log(`[DocBridge] 翻译进度: ${done}/${total}`);
+      },
+      onComplete: (results) => {
+        if (renderer) renderer.render(results);
+        console.log(`[DocBridge] 翻译完成: ${results.length} 个单元已渲染`);
+        isTranslating = false;
+        connectObserver();
+      },
+      onError: (err) => {
+        console.error("[DocBridge] 翻译错误:", err.message);
+      }
+    });
+    await queue.start(batches);
+    queue.destroy();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[DocBridge] 翻译流程异常:", msg);
+    isTranslating = false;
+    connectObserver();
+  }
+}
+function setupMutationObserver() {
+  observer = new MutationObserver(() => {
+    if (translateTimer) clearTimeout(translateTimer);
+    translateTimer = setTimeout(() => {
+      const currentUrl = location.href;
+      if (currentUrl !== lastUrl) {
+        lastUrl = currentUrl;
+        if (renderer) renderer.clear();
+        translatePage();
+        return;
+      }
+      const unprocessed = document.querySelectorAll(
+        "p:not([data-dt-processed]), h1:not([data-dt-processed]), h2:not([data-dt-processed]), h3:not([data-dt-processed]), li:not([data-dt-processed]), td:not([data-dt-processed])"
+      );
+      if (unprocessed.length > 5) {
+        translatePage();
+      }
+    }, 1e3);
+  });
+  connectObserver();
+}
+function connectObserver() {
+  if (observer) {
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+}
+function disconnectObserver() {
+  if (observer) {
+    observer.disconnect();
+  }
+}
+function setupMessageListener() {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    try {
+      switch (message.type) {
+        case "TOGGLE_DISPLAY": {
+          const { mode } = message.payload;
+          if (renderer) {
+            renderer.setMode(mode);
+          }
+          sendResponse({ success: true });
+          break;
+        }
+        case "START_TRANSLATE": {
+          translatePage();
+          sendResponse({ success: true });
+          break;
+        }
+        default:
+          break;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[DocBridge] 消息处理异常:", msg);
+      sendResponse({ error: msg });
+    }
+    return true;
+  });
+}
+function injectFloatingBar() {
+  const bar = document.createElement("div");
+  bar.id = "docbridge-floating-bar";
+  bar.style.cssText = [
+    "position:fixed",
+    "bottom:20px",
+    "right:20px",
+    "z-index:2147483647",
+    "display:flex",
+    "gap:6px",
+    "padding:8px 12px",
+    "background:rgba(255,255,255,0.95)",
+    "border:1px solid #d9d9d9",
+    "border-radius:8px",
+    "box-shadow:0 2px 12px rgba(0,0,0,0.12)",
+    "font-family:sans-serif",
+    "font-size:13px"
+  ].join(";");
+  bar.appendChild(createBtn("翻译", translatePage, "#1890ff", "#fff"));
+  bar.appendChild(createBtn("还原", () => renderer?.clear(), "#595959", "#fff"));
+  const sep = document.createElement("span");
+  sep.style.cssText = "color:#d9d9d9;line-height:28px;";
+  sep.textContent = "|";
+  bar.appendChild(sep);
+  bar.appendChild(createBtn("双语", () => renderer?.setMode("bilingual"), "#52c41a", "#fff"));
+  bar.appendChild(createBtn("仅译文", () => renderer?.setMode("translated-only"), "#faad14", "#fff"));
+  bar.appendChild(createBtn("仅原文", () => renderer?.setMode("original-only"), "#d9d9d9", "#333"));
+  document.body.appendChild(bar);
+}
+function createBtn(text, onClick, bgColor, color) {
+  const btn = document.createElement("button");
+  btn.textContent = text;
+  btn.style.cssText = [
+    "padding:4px 10px",
+    `background:${bgColor}`,
+    `color:${color}`,
+    "border:none",
+    "border-radius:4px",
+    "cursor:pointer",
+    "font-size:12px",
+    "line-height:20px",
+    "white-space:nowrap"
+  ].join(";");
+  btn.addEventListener("click", onClick);
+  return btn;
+}
 //# sourceMappingURL=index.js.map
