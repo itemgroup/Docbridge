@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocBridge 设置</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="options-container">
+    <h1 class="page-title">DocBridge 设置</h1>
+
+    <!-- API 密钥 -->
+    <section class="section">
+      <h2 class="section-title">DeepSeek API 配置</h2>
+      <div class="form-group">
+        <label for="api-key">API 密钥</label>
+        <div class="input-with-toggle">
+          <input type="password" id="api-key" class="input" placeholder="sk-...">
+          <button id="btn-toggle-key" class="btn-toggle" title="显示/隐藏">👁</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="api-base-url">自定义 API 地址（可选）</label>
+        <input type="text" id="api-base-url" class="input" placeholder="https://api.deepseek.com/v1">
+      </div>
+    </section>
+
+    <!-- 术语表 -->
+    <section class="section">
+      <h2 class="section-title">自定义术语表</h2>
+      <div class="glossary-list" id="glossary-list">
+        <!-- 动态填充 -->
+      </div>
+      <div class="add-term">
+        <input type="text" id="term-input" class="input" placeholder="英文术语" style="flex:1">
+        <input type="text" id="term-translation" class="input" placeholder="中文翻译" style="flex:1">
+        <input type="text" id="term-domain" class="input" placeholder="领域(可选)" style="flex:0.6">
+        <button id="btn-add-term" class="btn btn-primary" style="flex:0.3">添加</button>
+      </div>
+    </section>
+
+    <!-- 黑白名单 -->
+    <section class="section">
+      <h2 class="section-title">网站过滤</h2>
+      <div class="form-group">
+        <label for="whitelist">白名单（每行一个域名，如 example.com）</label>
+        <textarea id="whitelist" class="textarea" rows="3" placeholder="example.com"></textarea>
+      </div>
+      <div class="form-group">
+        <label for="blacklist">黑名单（每行一个域名）</label>
+        <textarea id="blacklist" class="textarea" rows="3" placeholder="google.com"></textarea>
+      </div>
+    </section>
+
+    <!-- 默认模式 -->
+    <section class="section">
+      <h2 class="section-title">默认翻译模式</h2>
+      <select id="default-mode" class="input">
+        <option value="bilingual">双语对照</option>
+        <option value="translated-only">仅译文</option>
+        <option value="original-only">仅原文</option>
+      </select>
+    </section>
+
+    <!-- 保存按钮 -->
+    <div class="save-section">
+      <button id="btn-save" class="btn btn-primary btn-large">保存设置</button>
+      <span id="save-hint" class="save-hint"></span>
+    </div>
+  </div>
+  <script src="../options.js"></script>
+</body>
+</html>

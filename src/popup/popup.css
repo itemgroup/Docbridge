@@ -1,0 +1,140 @@
+/* DocBridge Popup 样式 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 280px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  color: #333;
+  background: #fff;
+}
+
+.popup-container {
+  padding: 16px;
+}
+
+.title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1890ff;
+  text-align: center;
+}
+
+.subtitle {
+  font-size: 12px;
+  color: #999;
+  text-align: center;
+  margin-bottom: 12px;
+}
+
+.status {
+  text-align: center;
+  padding: 8px;
+  margin-bottom: 12px;
+  background: #f6f8fa;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #666;
+}
+
+.status .ready { color: #52c41a; }
+.status .translating { color: #1890ff; }
+.status .error { color: #ff4d4f; }
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.btn {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.btn:hover {
+  opacity: 0.85;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: #1890ff;
+  color: #fff;
+}
+
+.btn-danger {
+  background: #ff4d4f;
+  color: #fff;
+}
+
+.btn-secondary {
+  background: #f0f0f0;
+  color: #333;
+}
+
+.section-title {
+  font-size: 12px;
+  color: #999;
+  margin-bottom: 8px;
+}
+
+.mode-section {
+  margin-bottom: 12px;
+}
+
+.mode-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mode-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+
+.mode-label:hover {
+  background: #f6f8fa;
+}
+
+.mode-label input[type="radio"] {
+  accent-color: #1890ff;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.link {
+  color: #1890ff;
+  text-decoration: none;
+  font-size: 12px;
+}
+
+.link:hover {
+  text-decoration: underline;
+}

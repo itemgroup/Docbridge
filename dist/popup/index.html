@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocBridge</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <h1 class="title">DocBridge</h1>
+    <p class="subtitle">AI 技术文档翻译</p>
+
+    <div id="status" class="status">
+      <span id="status-text">就绪</span>
+    </div>
+
+    <div class="actions">
+      <button id="btn-translate" class="btn btn-primary">翻译页面</button>
+      <button id="btn-clear" class="btn btn-danger">还原页面</button>
+    </div>
+
+    <div class="mode-section">
+      <p class="section-title">显示模式</p>
+      <div class="mode-group">
+        <label class="mode-label">
+          <input type="radio" name="displayMode" value="bilingual" checked>
+          <span>双语对照</span>
+        </label>
+        <label class="mode-label">
+          <input type="radio" name="displayMode" value="translated-only">
+          <span>仅译文</span>
+        </label>
+        <label class="mode-label">
+          <input type="radio" name="displayMode" value="original-only">
+          <span>仅原文</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="footer">
+      <button id="btn-export" class="btn btn-secondary">导出 HTML</button>
+      <a id="link-options" class="link" href="#">设置</a>
+    </div>
+  </div>
+  <script src="../popup.js"></script>
+</body>
+</html>
