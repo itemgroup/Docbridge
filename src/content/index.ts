@@ -1,5 +1,5 @@
-// Content Script 入口 | 页面翻译全流程组装 + SPA 自动翻译
-import type { DTMessage, DisplayMode, TranslatedUnit } from '../shared/types';
+// Content Script 入口 | 页面翻译全流程组装 + SPA 增量翻译
+import type { DTMessage, DisplayMode, TranslatedUnit, TranslationUnit } from '../shared/types';
 import { scanPage } from './scanner/dom-scanner';
 import { buildBatches } from './analyzer/unit-builder';
 import { TranslationQueue } from './translator/translation-queue';
@@ -12,7 +12,7 @@ let currentMode: DisplayMode = 'bilingual';
 /** 翻译是否进行中 */
 let isTranslating = false;
 
-/** 页面是否被锁定（防止 MutationObserver 重复触发） */
+/** 页面是否被锁定 */
 let isLocked = false;
 
 /** 已翻译结果缓存 */
@@ -27,6 +27,9 @@ let observer: MutationObserver | null = null;
 /** 防抖定时器 */
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** 增量扫描新增节点收集 */
+let pendingNewNodes: HTMLElement[] = [];
+
 /**
  * 注入全局样式和浮动控制栏
  */
@@ -34,7 +37,6 @@ function initialize(): void {
   injectGlobalStyles();
   createFloatingBar();
 
-  // 监听来自 popup 的消息
   chrome.runtime.onMessage.addListener((message: DTMessage, _sender, sendResponse) => {
     handleMessage(message).then((result) => sendResponse(result));
     return true;
@@ -50,13 +52,13 @@ async function handleMessage(message: DTMessage): Promise<{ success: boolean; er
   try {
     switch (message.type) {
       case 'START_TRANSLATE':
+        // 手动点击翻译：完整正文扫描
         await translatePage();
         return { success: true };
 
       case 'TOGGLE_DISPLAY':
         currentMode = (message.payload as DisplayMode) || 'bilingual';
         applyDisplayMode(currentMode);
-        // 如果切换到 bilingual/translated-only 且有结果，重新渲染
         if (currentMode !== 'original-only' && translatedResults.length > 0) {
           ensureRendered(translatedResults);
         }
@@ -70,7 +72,6 @@ async function handleMessage(message: DTMessage): Promise<{ success: boolean; er
 
       case 'EXPORT_HTML': {
         const html = exportHTML();
-        // 通过 Blob 下载
         const blob = new Blob([html], { type: 'text/html' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -90,7 +91,8 @@ async function handleMessage(message: DTMessage): Promise<{ success: boolean; er
 }
 
 /**
- * 完整翻译流程
+ * 完整翻译流程（手动点击触发）
+ * 扫描整个正文区域 → 构建批次 → 翻译 → 渲染
  */
 async function translatePage(): Promise<void> {
   if (isTranslating) return;
@@ -98,44 +100,52 @@ async function translatePage(): Promise<void> {
   isLocked = true;
 
   try {
-    console.log('[DocBridge] 开始扫描页面...');
-    const units = await scanPage(document.body);
+    console.log('[DocBridge] 开始完整正文扫描...');
+    // scanPage() 无参 → 自动寻找 main/article
+    const units = await scanPage();
 
     if (units.length === 0) {
-      console.log('[DocBridge] 未发现需要翻译的文本');
+      console.log('[DocBridge] 正文区域未发现需要翻译的文本');
       return;
     }
 
     console.log(`[DocBridge] 发现 ${units.length} 个翻译单元`);
 
-    const batches = buildBatches(units);
-    console.log(`[DocBridge] 分为 ${batches.length} 个批次`);
-
-    translatedResults = [];
-
-    await new Promise<void>((resolve) => {
-      queue.start(
-        batches,
-        (completed, total) => {
-          console.log(`[DocBridge] 翻译进度: ${completed}/${total}`);
-        },
-        (results) => {
-          translatedResults = results;
-          renderTranslation(results, currentMode);
-          resolve();
-        },
-        (error, _failedIds) => {
-          console.error('[DocBridge] 翻译出错:', error);
-          resolve();
-        }
-      );
-    });
-
-    console.log(`[DocBridge] 翻译完成，共 ${translatedResults.length} 条`);
+    await processUnits(units);
   } finally {
     isTranslating = false;
     isLocked = false;
   }
+}
+
+/**
+ * 处理翻译单元：构建批次 → 翻译 → 渲染
+ */
+async function processUnits(units: TranslationUnit[]): Promise<void> {
+  const batches = buildBatches(units);
+  console.log(`[DocBridge] 分为 ${batches.length} 个批次`);
+
+  translatedResults = [];
+
+  await new Promise<void>((resolve) => {
+    queue.start(
+      batches,
+      (completed, total) => {
+        console.log(`[DocBridge] 翻译进度: ${completed}/${total}`);
+      },
+      (results) => {
+        translatedResults = results;
+        renderTranslation(results, currentMode);
+        resolve();
+      },
+      (error, _failedIds) => {
+        console.error('[DocBridge] 翻译出错:', error);
+        resolve();
+      }
+    );
+  });
+
+  console.log(`[DocBridge] 翻译完成，共 ${translatedResults.length} 条`);
 }
 
 /**
@@ -151,42 +161,38 @@ function ensureRendered(results: TranslatedUnit[]): void {
 }
 
 /**
- * 启动 SPA DOM 变化监听
+ * 启动 SPA DOM 变化监听（增量扫描）
+ * 不执行全页面重扫，仅对新增子树执行 TreeWalker 扫描
  */
 function startMutationObserver(): void {
   if (observer) return;
 
   observer = new MutationObserver((mutations) => {
-    // 锁定期间忽略
+    // 队列运行中 → 跳过，不追加大批量新任务
     if (isLocked || isTranslating) return;
 
+    // 收集新增的有效元素节点
     let hasNewContent = false;
-
     for (const mutation of mutations) {
-      // 忽略译文节点变化
       if (mutation.type === 'childList') {
         for (const node of mutation.addedNodes) {
           if (node.nodeType === Node.ELEMENT_NODE) {
             const el = node as HTMLElement;
-            // 忽略 dt-bridge 节点
             if (el.classList.contains('dt-bridge')) continue;
-            // 忽略 dt 控制栏
             if (el.id === 'dt-floating-bar') continue;
+            pendingNewNodes.push(el);
             hasNewContent = true;
-            break;
           }
         }
       }
-      if (hasNewContent) break;
     }
 
     if (!hasNewContent) return;
 
-    // 防抖
+    // 防抖：350ms 内多次 DOM 变动合并为一次
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
-      console.log('[DocBridge] 检测到 DOM 变化，自动翻译新内容...');
-      translatePage();
+      handleIncrementalScan();
     }, DOM_DEBOUNCE_MS);
   });
 
@@ -194,6 +200,48 @@ function startMutationObserver(): void {
     childList: true,
     subtree: true,
   });
+}
+
+/**
+ * 处理增量扫描：仅对新增 DOM 子树执行 TreeWalker
+ */
+async function handleIncrementalScan(): Promise<void> {
+  if (pendingNewNodes.length === 0) return;
+  if (isTranslating) return;
+
+  // 取出待处理节点并清空
+  const nodes = pendingNewNodes;
+  pendingNewNodes = [];
+
+  console.log(`[DocBridge] 检测到 ${nodes.length} 个新增节点，增量扫描...`);
+
+  // 筛选仍在 DOM 中的节点
+  const liveNodes = nodes.filter((n) => n.isConnected);
+  if (liveNodes.length === 0) return;
+
+  try {
+    // 对每个新增子树独立扫描
+    const allUnits: TranslationUnit[] = [];
+    for (const node of liveNodes) {
+      const units = await scanPage(node);
+      allUnits.push(...units);
+    }
+
+    if (allUnits.length === 0) return;
+
+    console.log(`[DocBridge] 增量发现 ${allUnits.length} 个新翻译单元`);
+
+    // 过滤已翻译
+    const newUnits = allUnits.filter(
+      (u) => !u.element.hasAttribute('data-dt-translated')
+    );
+
+    if (newUnits.length === 0) return;
+
+    await processUnits(newUnits);
+  } catch (error) {
+    console.error('[DocBridge] 增量扫描失败:', error);
+  }
 }
 
 /**
@@ -211,19 +259,17 @@ function createFloatingBar(): void {
     padding: 12px; font-family: sans-serif; font-size: 13px;
   `;
 
-  // 标题
   const title = document.createElement('div');
   title.textContent = 'DocBridge';
   title.style.cssText = 'font-weight:700;text-align:center;color:#1890ff;font-size:14px;margin-bottom:4px;';
   bar.appendChild(title);
 
-  // 翻译按钮
+  // 翻译按钮（手动点击 → 完整正文扫描）
   const translateBtn = createButton('翻译', '#1890ff', '#fff', () => {
     translatePage();
   });
   bar.appendChild(translateBtn);
 
-  // 模式切换按钮组
   const modes: Array<{ label: string; mode: DisplayMode }> = [
     { label: '双语', mode: 'bilingual' },
     { label: '仅译文', mode: 'translated-only' },
@@ -242,7 +288,6 @@ function createFloatingBar(): void {
     bar.appendChild(btn);
   }
 
-  // 还原按钮
   const clearBtn = createButton('还原', '#ff4d4f', '#fff', () => {
     clearTranslation();
     translatedResults = [];
@@ -253,9 +298,6 @@ function createFloatingBar(): void {
   document.body.appendChild(bar);
 }
 
-/**
- * 创建按钮辅助函数
- */
 function createButton(
   text: string,
   bgColor: string,

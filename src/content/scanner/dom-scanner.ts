@@ -1,17 +1,39 @@
-// DOM 扫描器 v2 | 递归深度遍历，修复外层容器跳过的 bug
+// DOM 扫描器 v5 | 正文区域限定 + UI 元素排除 + 文本长度过滤
 import type { TranslationUnit, UnitType } from '../../shared/types';
 
-/** 永久跳过的标签（内部不扫描任何文字） */
+/**
+ * 永久跳过的标签（内部文本完全不扫描）
+ * code/pre 代码块、脚本、样式、svg、iframe
+ */
 const SKIP_TAGS = new Set([
   'script', 'style', 'noscript',
   'code', 'pre',
   'iframe', 'svg',
 ]);
 
-/** 整体跳过的语义容器（不递归进入） */
-const SKIP_CONTAINERS = new Set([
-  'nav', 'header', 'footer', 'aside',
+/**
+ * 需跳过的标签（导航 / UI 组件 / 表单控件）
+ * 仅 main/article 内部段落正文的文本才会被扫描
+ */
+const SKIP_CONTAINER_TAGS = new Set([
+  'nav', 'aside', 'header', 'footer',
+  'button', 'input', 'select', 'textarea',
 ]);
+
+/** 需跳过的 [role] 属性值 */
+const SKIP_ROLES = new Set([
+  'navigation', 'menu', 'menubar', 'button',
+  'banner', 'contentinfo', 'complementary',
+  'search', 'form',
+]);
+
+/** 需跳过的 CSS class 关键词 */
+const SKIP_CLASS_KEYWORDS = [
+  'nav', 'menu', 'sidebar', 'header', 'footer',
+  'breadcrumb', 'pagination', 'toc', 'table-of-contents',
+  'cookie', 'banner', 'ad', 'advertisement',
+  'comment', 'social', 'share',
+];
 
 /** 视口内优先级 */
 const VIEWPORT_PRIORITY = 10;
@@ -20,128 +42,159 @@ const VIEWPORT_PRIORITY = 10;
 let idCounter = 0;
 
 /**
- * 扫描页面，提取所有需要翻译的文本单元
+ * 扫描页面正文区域
+ * 优先寻找 <main>/<article>，找不到则 fallback 到 body
  */
 export async function scanPage(
-  root: HTMLElement = document.body
+  root?: HTMLElement
 ): Promise<TranslationUnit[]> {
-  const units: TranslationUnit[] = [];
-  scanElement(root, '', [], units);
+  const scanRoot = root || findContentRoot();
+  const units = scanTextNodes(scanRoot);
+
+  // 调试
+  (window as unknown as Record<string, unknown>).__translationUnits = units;
+
   return units;
 }
 
 /**
- * 递归深度遍历 DOM，提取叶子文本节点
- * 核心逻辑：逐层深入，只跳过明确不可翻译的标签
+ * 寻找页面正文容器：<main> → <article> → body
  */
-function scanElement(
-  element: HTMLElement,
-  section: string,
-  contextChain: string[],
-  result: TranslationUnit[]
-): void {
-  const tagName = element.tagName.toLowerCase();
+function findContentRoot(): HTMLElement {
+  const main = document.querySelector('main');
+  if (main) return main as HTMLElement;
 
-  // 1. 永久跳过：代码/脚本/样式/svg/iframe
-  if (SKIP_TAGS.has(tagName)) return;
+  const article = document.querySelector('article');
+  if (article) return article as HTMLElement;
 
-  // 2. 整体跳过语义容器：nav/header/footer/aside
-  if (SKIP_CONTAINERS.has(tagName)) return;
+  return document.body;
+}
 
-  // 3. 跳过已翻译标记
-  if (element.hasAttribute('data-dt-translated')) return;
+/**
+ * TreeWalker 遍历 Text 节点，按父元素分组合并
+ * 跳过导航/侧边栏/页脚/按钮/表单控件内部文本
+ */
+function scanTextNodes(root: HTMLElement): TranslationUnit[] {
+  const parentMap = new Map<HTMLElement, string[]>();
 
-  // 4. 跳过 dt exclude 标记
-  if (element.hasAttribute('data-dt-exclude')) return;
+  const walker = document.createTreeWalker(
+    root,
+    NodeFilter.SHOW_TEXT,
+    {
+      acceptNode: (node: Text): number => {
+        if (isInsideSkippedArea(node)) return NodeFilter.FILTER_REJECT;
 
-  // 5. 跳过隐藏元素
-  if (isHidden(element)) return;
+        const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text) return NodeFilter.FILTER_REJECT;
 
-  // 6. 更新上下文链：标题作为 section
-  let newSection = section;
-  const newContextChain = [...contextChain];
-  if (/^h[1-6]$/.test(tagName)) {
-    const headingText = element.textContent?.trim() || '';
-    if (headingText) {
-      newSection = headingText;
-      newContextChain.push(headingText);
+        return NodeFilter.FILTER_ACCEPT;
+      },
     }
-  }
+  );
 
-  // 7. 判断是否为叶子：无子元素的文本节点
-  const childElements = getChildElements(element);
+  // 收集文本节点，按父元素分组
+  let textNode: Text | null;
+  while ((textNode = walker.nextNode() as Text | null)) {
+    const raw = (textNode.textContent || '').replace(/\s+/g, ' ').trim();
 
-  if (childElements.length === 0) {
-    // 叶子节点：直接提取文本
-    tryCreateUnit(element, newSection, newContextChain, result);
-    return;
-  }
+    // 过滤过短文本（< 8 字符），丢弃 UI 碎片、单个单词
+    if (raw.length < 8) continue;
 
-  // 8. 有子元素时：逐层递归深入
-  //    不再使用 BLOCK_CONTAINER_SELECTORS 判断是否跳过父级
-  //    而是递归进入每个子元素，确保内部 p/li/a 等全部被扫描
-  for (const child of childElements) {
-    scanElement(child, newSection, newContextChain, result);
-  }
-}
+    // 过滤纯数字/符号/标点
+    if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(raw)) continue;
 
-/**
- * 获取元素的直接子元素（过滤空文本节点）
- */
-function getChildElements(element: HTMLElement): HTMLElement[] {
-  const result: HTMLElement[] = [];
-  for (const node of element.childNodes) {
-    if (node.nodeType === Node.ELEMENT_NODE) {
-      result.push(node as HTMLElement);
+    const parent = textNode.parentElement;
+    if (!parent) continue;
+    if (parent.hasAttribute('data-dt-translated')) continue;
+
+    // 父元素本身是跳过标签 → 丢弃
+    if (SKIP_CONTAINER_TAGS.has(parent.tagName.toLowerCase())) continue;
+
+    if (!parentMap.has(parent)) {
+      parentMap.set(parent, []);
     }
+    parentMap.get(parent)!.push(raw);
   }
-  return result;
+
+  // 组装 TranslationUnit
+  const units: TranslationUnit[] = [];
+  for (const [parent, texts] of parentMap) {
+    const combinedText = texts.join(' ');
+    if (combinedText.length < 8) continue;
+
+    const tagName = parent.tagName.toLowerCase();
+    const inViewport = isInViewport(parent);
+
+    const unit: TranslationUnit = {
+      id: `dt-${++idCounter}`,
+      type: determineUnitType(tagName),
+      element: parent,
+      originalText: combinedText,
+      htmlContext: tagName,
+      contextChain: buildContextChain(parent),
+      isInShadowDOM: false,
+      isInIframe: false,
+      priority: inViewport ? VIEWPORT_PRIORITY : 0,
+    };
+
+    units.push(unit);
+  }
+
+  return units;
 }
 
 /**
- * 尝试为叶子元素创建翻译单元
+ * 判断文本节点是否在需要跳过的区域内部
+ * 检查标签名、role 属性、CSS class
  */
-function tryCreateUnit(
-  element: HTMLElement,
-  section: string,
-  contextChain: string[],
-  result: TranslationUnit[]
-): void {
-  const text = getCleanText(element);
+function isInsideSkippedArea(node: Text): boolean {
+  let parent: HTMLElement | null = node.parentElement;
 
-  // 过滤纯空白
-  if (!text) return;
+  while (parent) {
+    const tagName = parent.tagName.toLowerCase();
 
-  // 过滤纯数字/符号/标点
-  if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(text)) return;
+    // code/pre/script/style/svg/iframe
+    if (SKIP_TAGS.has(tagName)) return true;
 
-  const tagName = element.tagName.toLowerCase();
-  const inViewport = isInViewport(element);
-  const priority = inViewport ? VIEWPORT_PRIORITY : 0;
+    // nav/aside/header/footer/button/input/select
+    if (SKIP_CONTAINER_TAGS.has(tagName)) return true;
 
-  const unit: TranslationUnit = {
-    id: `dt-${++idCounter}`,
-    type: determineUnitType(tagName),
-    element,
-    originalText: text,
-    htmlContext: tagName,
-    contextChain: section ? [section, ...contextChain] : contextChain,
-    isInShadowDOM: false,
-    isInIframe: false,
-    priority,
-  };
+    // [role] 属性
+    const role = parent.getAttribute('role');
+    if (role && SKIP_ROLES.has(role)) return true;
 
-  result.push(unit);
+    // CSS class 关键词
+    const className = parent.className;
+    if (typeof className === 'string') {
+      const lowerClass = className.toLowerCase();
+      for (const keyword of SKIP_CLASS_KEYWORDS) {
+        if (lowerClass.includes(keyword)) return true;
+      }
+    }
+
+    parent = parent.parentElement;
+  }
+
+  return false;
 }
 
 /**
- * 获取元素纯净文本（innerText，去除多余空白）
+ * 向上遍历 DOM 构建上下文链（收集 h1-h6 标题文本）
  */
-function getCleanText(element: HTMLElement): string {
-  const raw = element.innerText || element.textContent || '';
-  return raw
-    .replace(/\s+/g, ' ')
-    .trim();
+function buildContextChain(element: HTMLElement): string[] {
+  const chain: string[] = [];
+  let current: HTMLElement | null = element.parentElement;
+
+  while (current) {
+    const tagName = current.tagName.toLowerCase();
+    if (/^h[1-6]$/.test(tagName)) {
+      const text = (current.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text) chain.unshift(text);
+    }
+    current = current.parentElement;
+  }
+
+  return chain;
 }
 
 /**
@@ -153,7 +206,7 @@ function determineUnitType(tagName: string): UnitType {
   if (tagName === 'li') return 'list_item';
   if (tagName === 'td' || tagName === 'th') return 'table_cell';
   if (tagName === 'figcaption' || tagName === 'caption') return 'caption';
-  if (tagName === 'a' || tagName === 'button') return 'navigation';
+  if (tagName === 'a') return 'navigation';
   return 'paragraph';
 }
 
@@ -168,14 +221,6 @@ function isInViewport(element: HTMLElement): boolean {
     rect.left < window.innerWidth &&
     rect.right > 0
   );
-}
-
-/**
- * 判断元素是否隐藏（display:none 或 visibility:hidden）
- */
-function isHidden(element: HTMLElement): boolean {
-  const style = window.getComputedStyle(element);
-  return style.display === 'none' || style.visibility === 'hidden';
 }
 
 /**

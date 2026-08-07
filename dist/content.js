@@ -9,77 +9,140 @@
     "iframe",
     "svg"
   ]);
-  const SKIP_CONTAINERS = /* @__PURE__ */ new Set([
+  const SKIP_CONTAINER_TAGS = /* @__PURE__ */ new Set([
     "nav",
+    "aside",
     "header",
     "footer",
-    "aside"
+    "button",
+    "input",
+    "select",
+    "textarea"
   ]);
+  const SKIP_ROLES = /* @__PURE__ */ new Set([
+    "navigation",
+    "menu",
+    "menubar",
+    "button",
+    "banner",
+    "contentinfo",
+    "complementary",
+    "search",
+    "form"
+  ]);
+  const SKIP_CLASS_KEYWORDS = [
+    "nav",
+    "menu",
+    "sidebar",
+    "header",
+    "footer",
+    "breadcrumb",
+    "pagination",
+    "toc",
+    "table-of-contents",
+    "cookie",
+    "banner",
+    "ad",
+    "advertisement",
+    "comment",
+    "social",
+    "share"
+  ];
   const VIEWPORT_PRIORITY = 10;
   let idCounter = 0;
-  async function scanPage(root = document.body) {
-    const units = [];
-    scanElement(root, "", [], units);
+  async function scanPage(root) {
+    const scanRoot = root || findContentRoot();
+    const units = scanTextNodes(scanRoot);
+    window.__translationUnits = units;
     return units;
   }
-  function scanElement(element, section, contextChain, result) {
-    var _a;
-    const tagName = element.tagName.toLowerCase();
-    if (SKIP_TAGS.has(tagName)) return;
-    if (SKIP_CONTAINERS.has(tagName)) return;
-    if (element.hasAttribute("data-dt-translated")) return;
-    if (element.hasAttribute("data-dt-exclude")) return;
-    if (isHidden(element)) return;
-    let newSection = section;
-    const newContextChain = [...contextChain];
-    if (/^h[1-6]$/.test(tagName)) {
-      const headingText = ((_a = element.textContent) == null ? void 0 : _a.trim()) || "";
-      if (headingText) {
-        newSection = headingText;
-        newContextChain.push(headingText);
+  function findContentRoot() {
+    const main = document.querySelector("main");
+    if (main) return main;
+    const article = document.querySelector("article");
+    if (article) return article;
+    return document.body;
+  }
+  function scanTextNodes(root) {
+    const parentMap = /* @__PURE__ */ new Map();
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode: (node) => {
+          if (isInsideSkippedArea(node)) return NodeFilter.FILTER_REJECT;
+          const text = (node.textContent || "").replace(/\s+/g, " ").trim();
+          if (!text) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        }
       }
-    }
-    const childElements = getChildElements(element);
-    if (childElements.length === 0) {
-      tryCreateUnit(element, newSection, newContextChain, result);
-      return;
-    }
-    for (const child of childElements) {
-      scanElement(child, newSection, newContextChain, result);
-    }
-  }
-  function getChildElements(element) {
-    const result = [];
-    for (const node of element.childNodes) {
-      if (node.nodeType === Node.ELEMENT_NODE) {
-        result.push(node);
+    );
+    let textNode;
+    while (textNode = walker.nextNode()) {
+      const raw = (textNode.textContent || "").replace(/\s+/g, " ").trim();
+      if (raw.length < 8) continue;
+      if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(raw)) continue;
+      const parent = textNode.parentElement;
+      if (!parent) continue;
+      if (parent.hasAttribute("data-dt-translated")) continue;
+      if (SKIP_CONTAINER_TAGS.has(parent.tagName.toLowerCase())) continue;
+      if (!parentMap.has(parent)) {
+        parentMap.set(parent, []);
       }
+      parentMap.get(parent).push(raw);
     }
-    return result;
+    const units = [];
+    for (const [parent, texts] of parentMap) {
+      const combinedText = texts.join(" ");
+      if (combinedText.length < 8) continue;
+      const tagName = parent.tagName.toLowerCase();
+      const inViewport = isInViewport(parent);
+      const unit = {
+        id: `dt-${++idCounter}`,
+        type: determineUnitType(tagName),
+        element: parent,
+        originalText: combinedText,
+        htmlContext: tagName,
+        contextChain: buildContextChain(parent),
+        isInShadowDOM: false,
+        isInIframe: false,
+        priority: inViewport ? VIEWPORT_PRIORITY : 0
+      };
+      units.push(unit);
+    }
+    return units;
   }
-  function tryCreateUnit(element, section, contextChain, result) {
-    const text = getCleanText(element);
-    if (!text) return;
-    if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(text)) return;
-    const tagName = element.tagName.toLowerCase();
-    const inViewport = isInViewport(element);
-    const priority = inViewport ? VIEWPORT_PRIORITY : 0;
-    const unit = {
-      id: `dt-${++idCounter}`,
-      type: determineUnitType(tagName),
-      element,
-      originalText: text,
-      htmlContext: tagName,
-      contextChain: section ? [section, ...contextChain] : contextChain,
-      isInShadowDOM: false,
-      isInIframe: false,
-      priority
-    };
-    result.push(unit);
+  function isInsideSkippedArea(node) {
+    let parent = node.parentElement;
+    while (parent) {
+      const tagName = parent.tagName.toLowerCase();
+      if (SKIP_TAGS.has(tagName)) return true;
+      if (SKIP_CONTAINER_TAGS.has(tagName)) return true;
+      const role = parent.getAttribute("role");
+      if (role && SKIP_ROLES.has(role)) return true;
+      const className = parent.className;
+      if (typeof className === "string") {
+        const lowerClass = className.toLowerCase();
+        for (const keyword of SKIP_CLASS_KEYWORDS) {
+          if (lowerClass.includes(keyword)) return true;
+        }
+      }
+      parent = parent.parentElement;
+    }
+    return false;
   }
-  function getCleanText(element) {
-    const raw = element.innerText || element.textContent || "";
-    return raw.replace(/\s+/g, " ").trim();
+  function buildContextChain(element) {
+    const chain = [];
+    let current = element.parentElement;
+    while (current) {
+      const tagName = current.tagName.toLowerCase();
+      if (/^h[1-6]$/.test(tagName)) {
+        const text = (current.textContent || "").replace(/\s+/g, " ").trim();
+        if (text) chain.unshift(text);
+      }
+      current = current.parentElement;
+    }
+    return chain;
   }
   function determineUnitType(tagName) {
     if (/^h[1-6]$/.test(tagName)) return "heading";
@@ -87,16 +150,12 @@
     if (tagName === "li") return "list_item";
     if (tagName === "td" || tagName === "th") return "table_cell";
     if (tagName === "figcaption" || tagName === "caption") return "caption";
-    if (tagName === "a" || tagName === "button") return "navigation";
+    if (tagName === "a") return "navigation";
     return "paragraph";
   }
   function isInViewport(element) {
     const rect = element.getBoundingClientRect();
     return rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0;
-  }
-  function isHidden(element) {
-    const style = window.getComputedStyle(element);
-    return style.display === "none" || style.visibility === "hidden";
   }
   const MAX_BATCH_SIZE = 50;
   const MAX_CONCURRENT_REQUESTS = 5;
@@ -3573,6 +3632,7 @@
   const queue = new TranslationQueue();
   let observer = null;
   let debounceTimer = null;
+  let pendingNewNodes = [];
   function initialize() {
     injectGlobalStyles();
     createFloatingBar();
@@ -3623,38 +3683,41 @@
     isTranslating = true;
     isLocked = true;
     try {
-      console.log("[DocBridge] 开始扫描页面...");
-      const units = await scanPage(document.body);
+      console.log("[DocBridge] 开始完整正文扫描...");
+      const units = await scanPage();
       if (units.length === 0) {
-        console.log("[DocBridge] 未发现需要翻译的文本");
+        console.log("[DocBridge] 正文区域未发现需要翻译的文本");
         return;
       }
       console.log(`[DocBridge] 发现 ${units.length} 个翻译单元`);
-      const batches = buildBatches(units);
-      console.log(`[DocBridge] 分为 ${batches.length} 个批次`);
-      translatedResults = [];
-      await new Promise((resolve) => {
-        queue.start(
-          batches,
-          (completed, total) => {
-            console.log(`[DocBridge] 翻译进度: ${completed}/${total}`);
-          },
-          (results) => {
-            translatedResults = results;
-            renderTranslation(results, currentMode);
-            resolve();
-          },
-          (error, _failedIds) => {
-            console.error("[DocBridge] 翻译出错:", error);
-            resolve();
-          }
-        );
-      });
-      console.log(`[DocBridge] 翻译完成，共 ${translatedResults.length} 条`);
+      await processUnits(units);
     } finally {
       isTranslating = false;
       isLocked = false;
     }
+  }
+  async function processUnits(units) {
+    const batches = buildBatches(units);
+    console.log(`[DocBridge] 分为 ${batches.length} 个批次`);
+    translatedResults = [];
+    await new Promise((resolve) => {
+      queue.start(
+        batches,
+        (completed, total) => {
+          console.log(`[DocBridge] 翻译进度: ${completed}/${total}`);
+        },
+        (results) => {
+          translatedResults = results;
+          renderTranslation(results, currentMode);
+          resolve();
+        },
+        (error, _failedIds) => {
+          console.error("[DocBridge] 翻译出错:", error);
+          resolve();
+        }
+      );
+    });
+    console.log(`[DocBridge] 翻译完成，共 ${translatedResults.length} 条`);
   }
   function ensureRendered(results) {
     for (const unit of results) {
@@ -3676,24 +3739,47 @@
               const el = node;
               if (el.classList.contains("dt-bridge")) continue;
               if (el.id === "dt-floating-bar") continue;
+              pendingNewNodes.push(el);
               hasNewContent = true;
-              break;
             }
           }
         }
-        if (hasNewContent) break;
       }
       if (!hasNewContent) return;
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
-        console.log("[DocBridge] 检测到 DOM 变化，自动翻译新内容...");
-        translatePage();
+        handleIncrementalScan();
       }, DOM_DEBOUNCE_MS);
     });
     observer.observe(document.body, {
       childList: true,
       subtree: true
     });
+  }
+  async function handleIncrementalScan() {
+    if (pendingNewNodes.length === 0) return;
+    if (isTranslating) return;
+    const nodes = pendingNewNodes;
+    pendingNewNodes = [];
+    console.log(`[DocBridge] 检测到 ${nodes.length} 个新增节点，增量扫描...`);
+    const liveNodes = nodes.filter((n) => n.isConnected);
+    if (liveNodes.length === 0) return;
+    try {
+      const allUnits = [];
+      for (const node of liveNodes) {
+        const units = await scanPage(node);
+        allUnits.push(...units);
+      }
+      if (allUnits.length === 0) return;
+      console.log(`[DocBridge] 增量发现 ${allUnits.length} 个新翻译单元`);
+      const newUnits = allUnits.filter(
+        (u) => !u.element.hasAttribute("data-dt-translated")
+      );
+      if (newUnits.length === 0) return;
+      await processUnits(newUnits);
+    } catch (error) {
+      console.error("[DocBridge] 增量扫描失败:", error);
+    }
   }
   function createFloatingBar() {
     if (document.getElementById("dt-floating-bar")) return;
