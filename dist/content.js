@@ -4,7 +4,6 @@
     "script",
     "style",
     "noscript",
-    "code",
     "pre",
     "iframe",
     "svg"
@@ -48,7 +47,15 @@
     "social",
     "share"
   ];
-  const SEMANTIC_INLINE_TAGS = /* @__PURE__ */ new Set(["a", "sup", "sub"]);
+  const SEMANTIC_INLINE_TAGS = /* @__PURE__ */ new Set(["a", "sup", "sub", "code"]);
+  function hasPreAncestor(element) {
+    let parent = element.parentElement;
+    while (parent) {
+      if (parent.tagName.toLowerCase() === "pre") return true;
+      parent = parent.parentElement;
+    }
+    return false;
+  }
   const VIEWPORT_PRIORITY = 10;
   let idCounter = 0;
   async function scanPage(root) {
@@ -132,8 +139,10 @@
       } else if (child.nodeType === Node.ELEMENT_NODE) {
         const el = child;
         const tag = el.tagName.toLowerCase();
+        if (tag === "pre") continue;
         if (SKIP_TAGS.has(tag)) continue;
         if (SEMANTIC_INLINE_TAGS.has(tag)) {
+          if (tag === "code" && hasPreAncestor(el)) continue;
           const placeholder = `{{TAG_${tagIdx}}}`;
           const innerText = (el.innerText || el.textContent || "").trim();
           refs.push({ placeholder, element: el, originalText: innerText });
@@ -156,6 +165,7 @@
     while (parent) {
       const tagName = parent.tagName.toLowerCase();
       if (SKIP_TAGS.has(tagName)) return true;
+      if (tagName === "code" && hasPreAncestor(parent)) return true;
       if (SKIP_CONTAINER_TAGS.has(tagName)) return true;
       const role = parent.getAttribute("role");
       if (role && SKIP_ROLES.has(role)) return true;

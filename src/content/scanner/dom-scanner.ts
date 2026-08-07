@@ -3,11 +3,12 @@ import type { TranslationUnit, UnitType, InlineElementRef } from '../../shared/t
 
 /**
  * 永久跳过的标签（内部文本完全不扫描）
- * code/pre 代码块、脚本、样式、svg、iframe
+ * pre/script/style/svg/iframe
+ * 注意：code 已从此集合移除，改为根据是否有 <pre> 祖先动态判断
  */
 const SKIP_TAGS = new Set([
   'script', 'style', 'noscript',
-  'code', 'pre',
+  'pre',
   'iframe', 'svg',
 ]);
 
@@ -39,8 +40,19 @@ const SKIP_CLASS_KEYWORDS = [
  * 语义行内标签：整体占位，不拆分内部 Text 节点
  * <a> 超链接：保持 href/class/target 等全部属性，防止链接被撕裂
  * <sup>/<sub>：上下标，整体保留语义
+ * <code>：行内代码片段（无 <pre> 祖先），生成占位符保留原样
  */
-const SEMANTIC_INLINE_TAGS = new Set(['a', 'sup', 'sub']);
+const SEMANTIC_INLINE_TAGS = new Set(['a', 'sup', 'sub', 'code']);
+
+/** 检查元素是否有 <pre> 祖先（用于区分块级代码 vs 行内代码） */
+function hasPreAncestor(element: HTMLElement): boolean {
+  let parent: HTMLElement | null = element.parentElement;
+  while (parent) {
+    if (parent.tagName.toLowerCase() === 'pre') return true;
+    parent = parent.parentElement;
+  }
+  return false;
+}
 
 /** 视口内优先级 */
 const VIEWPORT_PRIORITY = 10;
@@ -170,17 +182,20 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
 }
 
 /**
- * 序列化父容器文本，将 <a>/<sup>/<sub> 替换为 {{TAG_N}} 占位符
+ * 序列化父容器文本，将语义行内元素替换为 {{TAG_N}} 占位符
  *
  * 遍历父容器的直接子节点（childNodes）：
  * - Text 节点 → 直接拼接
  * - <a>/<sup>/<sub> → 生成 {{TAG_N}} 占位符，保存原始 DOM 引用
- * - code/pre → 跳过整棵子树（FILTER_REJECT 等效）
+ * - <code> 无 <pre> 祖先 → 行内代码，生成占位符保留原样
+ * - <code> 有 <pre> 祖先 → 块级代码，跳过
+ * - pre → 跳过整棵子树（FILTER_REJECT 等效）
+ * - script/style/iframe/svg → 跳过
  * - br → 空格
  * - 其他元素 → 提取 innerText
  *
- * 占位符不含链接文字，LLM 看到的是纯占位符标记，
- * 确保 LLM 不会修改/撕裂超链接的文本内容。
+ * 占位符不含元素文字，LLM 看到的是纯占位符标记，
+ * 确保 LLM 不会修改/撕裂行内元素的内容。
  */
 function serializeWithPlaceholders(
   element: HTMLElement
@@ -196,11 +211,16 @@ function serializeWithPlaceholders(
       const el = child as HTMLElement;
       const tag = el.tagName.toLowerCase();
 
-      // code/pre 整棵子树跳过（FILTER_REJECT 等效）
+      // pre 整棵子树跳过（FILTER_REJECT 等效）
+      if (tag === 'pre') continue;
+
       if (SKIP_TAGS.has(tag)) continue;
 
       // 语义行内标签：整体占位，不拆分内部文本
       if (SEMANTIC_INLINE_TAGS.has(tag)) {
+        // code 有 pre 祖先 → 块级代码，跳过（FILTER_REJECT）
+        if (tag === 'code' && hasPreAncestor(el)) continue;
+
         const placeholder = `{{TAG_${tagIdx}}}`;
         const innerText = (el.innerText || el.textContent || '').trim();
         refs.push({ placeholder, element: el, originalText: innerText });
@@ -232,8 +252,11 @@ function isInsideSkippedArea(node: Text): boolean {
   while (parent) {
     const tagName = parent.tagName.toLowerCase();
 
-    // code/pre/script/style/svg/iframe
+    // pre/script/style/svg/iframe
     if (SKIP_TAGS.has(tagName)) return true;
+
+    // code: 仅当有 <pre> 祖先时视为跳过区域（块级代码），行内 code 不在此过滤
+    if (tagName === 'code' && hasPreAncestor(parent)) return true;
 
     // nav/aside/header/footer/button/input/select
     if (SKIP_CONTAINER_TAGS.has(tagName)) return true;

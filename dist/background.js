@@ -15,7 +15,8 @@
 2. 保留术语：React/Vue/API/DOM/CSS/HTML/HTTP/URL/GitHub/JSON/TypeScript/JavaScript/Python/Docker/Kubernetes/Linux/Git/CLI/SDK/UI/UX/SQL/NoSQL/REST/GraphQL/WebSocket/OAuth/JWT/CI/CD/Hooks/middleware/debounce/throttle；
 3. 代码、变量、URL、命令行保持原样；
 4. 只翻译自然语言和注释；
-5. 【强制】{{TAG_0}} {{TAG_1}} 等 {{TAG_N}} 占位符代表超链接或行内元素，必须严格原样保留，不得修改、删除或翻译占位符的任何字符。
+5. 【强制】{{TAG_0}} {{TAG_1}} 等 {{TAG_N}} 占位符代表超链接或行内元素，必须严格原样保留，不得修改、删除或翻译占位符的任何字符；
+6. {{TAG_N}} 也可能对应行内代码片段（如 <code>--pipeline_type LM</code>），占位符所在位置的代码内容必须原样保留在译文中，绝对不翻译。<｜end▁of▁thinking｜>5. 【强制】{{TAG_0}} {{TAG_1}} 等 {{TAG_N}} 占位符代表超链接或行内元素，必须严格原样保留，不得修改、删除或翻译占位符的任何字符；
 输出格式：UNIT_ID|||译文内容`;
   var commonjsGlobal = typeof globalThis !== "undefined" ? globalThis : typeof window !== "undefined" ? window : typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : {};
   function getDefaultExportFromCjs(x) {
