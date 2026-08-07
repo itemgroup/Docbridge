@@ -40,7 +40,7 @@ export const RETRY_BASE_DELAY_MS = 1000;
 export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** SPA DOM 变化防抖延迟（毫秒） */
-export const DOM_DEBOUNCE_MS = 500;
+export const DOM_DEBOUNCE_MS = 350;
 
 /** 翻译结果格式分隔符 */
 export const TRANSLATION_SEPARATOR = '|||';

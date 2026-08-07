@@ -1,175 +1,107 @@
 (function() {
   "use strict";
-  const MAX_BATCH_SIZE = 50;
-  const MAX_CONCURRENT_REQUESTS = 5;
-  const BATCH_INTERVAL_MS = 20;
-  const DOM_DEBOUNCE_MS = 500;
-  const EXCLUDE_SELECTORS = [
-    "nav",
-    "header",
-    "footer",
-    "aside",
+  const SKIP_TAGS = /* @__PURE__ */ new Set([
     "script",
     "style",
     "noscript",
-    "iframe",
-    '[role="navigation"]',
-    '[role="banner"]',
-    '[role="contentinfo"]',
-    ".nav",
-    ".navbar",
-    ".navigation",
-    ".header",
-    ".footer",
-    ".sidebar",
-    ".advertisement",
-    ".ad",
-    ".ads",
-    ".banner-ad",
-    '[class*="ad-"]',
-    '[class*="ads-"]',
-    '[id*="ad-"]',
-    ".cookie-banner",
-    ".cookie-consent",
-    ".popup",
-    ".modal",
-    ".comment",
-    ".comments",
-    "#comments"
-  ];
-  const CODE_SELECTORS = [
+    "code",
     "pre",
-    "code"
-  ];
-  const BLOCK_CONTAINER_SELECTORS = [
-    "p",
-    "li",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "td",
-    "th",
-    "dt",
-    "dd",
-    "figcaption",
-    "caption",
-    "blockquote",
-    "summary",
-    "label",
-    "legend"
-  ];
-  const DEFAULT_CONFIG = {
-    includeShadowDOM: false,
-    includeIframes: false,
-    minTextLength: 3,
-    viewportPriorityBonus: 100
-  };
+    "iframe",
+    "svg"
+  ]);
+  const SKIP_CONTAINERS = /* @__PURE__ */ new Set([
+    "nav",
+    "header",
+    "footer",
+    "aside"
+  ]);
+  const VIEWPORT_PRIORITY = 10;
   let idCounter = 0;
-  async function scanPage(root = document.body, config = {}) {
-    const cfg = { ...DEFAULT_CONFIG, ...config };
+  async function scanPage(root = document.body) {
     const units = [];
-    scanElement(root, null, [], false, false, cfg, units);
+    scanElement(root, "", [], units);
     return units;
   }
-  function scanElement(element, parentSection, contextChain, isInShadowDOM, isInIframe, config, result) {
-    if (shouldExclude(element)) return;
-    if (element.hasAttribute("data-dt-translated")) return;
-    if (isCodeBlock(element)) return;
-    const heading = getHeadingText(element);
-    const newContextChain = heading ? [...contextChain, heading] : [...contextChain];
-    const section = heading || parentSection;
-    if (isLeafTextContainer(element)) {
-      const unit = createUnit(element, section, newContextChain, isInShadowDOM, isInIframe, config);
-      if (unit) result.push(unit);
-      return;
-    }
-    const children = element.children;
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      scanElement(child, section, newContextChain, isInShadowDOM, isInIframe, config, result);
-    }
-  }
-  function shouldExclude(element) {
-    const tagName = element.tagName.toLowerCase();
-    for (const selector of EXCLUDE_SELECTORS) {
-      if (selector.startsWith(".") || selector.startsWith("#") || selector.startsWith("[")) {
-        if (element.matches(selector)) return true;
-      } else if (selector === tagName) {
-        return true;
-      }
-    }
-    if (element.hasAttribute("data-dt-exclude")) return true;
-    return false;
-  }
-  function isCodeBlock(element) {
-    const tagName = element.tagName.toLowerCase();
-    return CODE_SELECTORS.includes(tagName);
-  }
-  function isLeafTextContainer(element) {
-    const tagName = element.tagName.toLowerCase();
-    if (!BLOCK_CONTAINER_SELECTORS.includes(tagName)) return false;
-    for (const childSelector of BLOCK_CONTAINER_SELECTORS) {
-      if (element.querySelector(childSelector)) return false;
-    }
-    const text = getDirectText(element).trim();
-    return text.length > 0;
-  }
-  function getDirectText(element) {
-    let text = "";
-    for (const node of element.childNodes) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        text += node.textContent || "";
-      }
-    }
-    return text;
-  }
-  function getFullText(element) {
-    return element.innerText || element.textContent || "";
-  }
-  function getHeadingText(element) {
+  function scanElement(element, section, contextChain, result) {
     var _a;
     const tagName = element.tagName.toLowerCase();
+    if (SKIP_TAGS.has(tagName)) return;
+    if (SKIP_CONTAINERS.has(tagName)) return;
+    if (element.hasAttribute("data-dt-translated")) return;
+    if (element.hasAttribute("data-dt-exclude")) return;
+    if (isHidden(element)) return;
+    let newSection = section;
+    const newContextChain = [...contextChain];
     if (/^h[1-6]$/.test(tagName)) {
-      return ((_a = element.textContent) == null ? void 0 : _a.trim()) || null;
+      const headingText = ((_a = element.textContent) == null ? void 0 : _a.trim()) || "";
+      if (headingText) {
+        newSection = headingText;
+        newContextChain.push(headingText);
+      }
     }
-    return null;
+    const childElements = getChildElements(element);
+    if (childElements.length === 0) {
+      tryCreateUnit(element, newSection, newContextChain, result);
+      return;
+    }
+    for (const child of childElements) {
+      scanElement(child, newSection, newContextChain, result);
+    }
   }
-  function isInViewport(element) {
-    const rect = element.getBoundingClientRect();
-    return rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0;
+  function getChildElements(element) {
+    const result = [];
+    for (const node of element.childNodes) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        result.push(node);
+      }
+    }
+    return result;
   }
-  function determineUnitType(element) {
+  function tryCreateUnit(element, section, contextChain, result) {
+    const text = getCleanText(element);
+    if (!text) return;
+    if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(text)) return;
     const tagName = element.tagName.toLowerCase();
+    const inViewport = isInViewport(element);
+    const priority = inViewport ? VIEWPORT_PRIORITY : 0;
+    const unit = {
+      id: `dt-${++idCounter}`,
+      type: determineUnitType(tagName),
+      element,
+      originalText: text,
+      htmlContext: tagName,
+      contextChain: section ? [section, ...contextChain] : contextChain,
+      isInShadowDOM: false,
+      isInIframe: false,
+      priority
+    };
+    result.push(unit);
+  }
+  function getCleanText(element) {
+    const raw = element.innerText || element.textContent || "";
+    return raw.replace(/\s+/g, " ").trim();
+  }
+  function determineUnitType(tagName) {
     if (/^h[1-6]$/.test(tagName)) return "heading";
     if (tagName === "p") return "paragraph";
     if (tagName === "li") return "list_item";
     if (tagName === "td" || tagName === "th") return "table_cell";
     if (tagName === "figcaption" || tagName === "caption") return "caption";
-    if (tagName === "a" || tagName === "button" || tagName === "span") return "navigation";
+    if (tagName === "a" || tagName === "button") return "navigation";
     return "paragraph";
   }
-  function createUnit(element, section, contextChain, isInShadowDOM, isInIframe, config) {
-    const text = getFullText(element).trim();
-    if (text.length < config.minTextLength) return null;
-    if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(text)) return null;
-    const inViewport = isInViewport(element);
-    const priority = inViewport ? config.viewportPriorityBonus : 0;
-    const unit = {
-      id: `dt-${++idCounter}`,
-      type: determineUnitType(element),
-      element,
-      originalText: text,
-      htmlContext: element.tagName.toLowerCase(),
-      contextChain: section ? [section, ...contextChain] : contextChain,
-      isInShadowDOM,
-      isInIframe,
-      priority
-    };
-    return unit;
+  function isInViewport(element) {
+    const rect = element.getBoundingClientRect();
+    return rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0;
   }
+  function isHidden(element) {
+    const style = window.getComputedStyle(element);
+    return style.display === "none" || style.visibility === "hidden";
+  }
+  const MAX_BATCH_SIZE = 50;
+  const MAX_CONCURRENT_REQUESTS = 5;
+  const BATCH_INTERVAL_MS = 20;
+  const DOM_DEBOUNCE_MS = 350;
   function buildBatches(units) {
     const valid = filterValidUnits(units);
     if (valid.length === 0) return [];

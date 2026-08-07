@@ -1,173 +1,160 @@
-// DOM 扫描器 | 识别页面主内容区域的文本节点
+// DOM 扫描器 v2 | 递归深度遍历，修复外层容器跳过的 bug
 import type { TranslationUnit, UnitType } from '../../shared/types';
-import { EXCLUDE_SELECTORS, CODE_SELECTORS, BLOCK_CONTAINER_SELECTORS } from '../../shared/constants';
 
-/** 扫描配置 */
-export interface ScannerConfig {
-  /** 是否扫描 Shadow DOM */
-  includeShadowDOM: boolean;
-  /** 是否扫描 iframe */
-  includeIframes: boolean;
-  /** 最小文本长度 */
-  minTextLength: number;
-  /** 视口内优先级加成 */
-  viewportPriorityBonus: number;
-}
+/** 永久跳过的标签（内部不扫描任何文字） */
+const SKIP_TAGS = new Set([
+  'script', 'style', 'noscript',
+  'code', 'pre',
+  'iframe', 'svg',
+]);
 
-const DEFAULT_CONFIG: ScannerConfig = {
-  includeShadowDOM: false,
-  includeIframes: false,
-  minTextLength: 3,
-  viewportPriorityBonus: 100,
-};
+/** 整体跳过的语义容器（不递归进入） */
+const SKIP_CONTAINERS = new Set([
+  'nav', 'header', 'footer', 'aside',
+]);
 
-/** 全局计数器，生成唯一 ID */
+/** 视口内优先级 */
+const VIEWPORT_PRIORITY = 10;
+
+/** 全局计数器 */
 let idCounter = 0;
 
 /**
  * 扫描页面，提取所有需要翻译的文本单元
- * @param root - 扫描根元素
- * @param config - 可选配置
- * @returns TranslationUnit 数组
  */
 export async function scanPage(
-  root: HTMLElement = document.body,
-  config: Partial<ScannerConfig> = {}
+  root: HTMLElement = document.body
 ): Promise<TranslationUnit[]> {
-  const cfg = { ...DEFAULT_CONFIG, ...config };
   const units: TranslationUnit[] = [];
-
-  scanElement(root, null, [], false, false, cfg, units);
+  scanElement(root, '', [], units);
   return units;
 }
 
 /**
- * 递归扫描单个元素
- * - 跳过排除选择器匹配的元素
- * - 跳过已翻译标记的元素
- * - 跳过代码块
- * - 深度优先扫描，优先返回叶子文本节点
+ * 递归深度遍历 DOM，提取叶子文本节点
+ * 核心逻辑：逐层深入，只跳过明确不可翻译的标签
  */
 function scanElement(
   element: HTMLElement,
-  parentSection: string | null,
+  section: string,
   contextChain: string[],
-  isInShadowDOM: boolean,
-  isInIframe: boolean,
-  config: ScannerConfig,
   result: TranslationUnit[]
 ): void {
-  // 检查是否应排除
-  if (shouldExclude(element)) return;
+  const tagName = element.tagName.toLowerCase();
 
-  // 检查是否已翻译
+  // 1. 永久跳过：代码/脚本/样式/svg/iframe
+  if (SKIP_TAGS.has(tagName)) return;
+
+  // 2. 整体跳过语义容器：nav/header/footer/aside
+  if (SKIP_CONTAINERS.has(tagName)) return;
+
+  // 3. 跳过已翻译标记
   if (element.hasAttribute('data-dt-translated')) return;
 
-  // 检查是否为代码块（跳过）
-  if (isCodeBlock(element)) return;
+  // 4. 跳过 dt exclude 标记
+  if (element.hasAttribute('data-dt-exclude')) return;
 
-  // 更新上下文链
-  const heading = getHeadingText(element);
-  const newContextChain = heading
-    ? [...contextChain, heading]
-    : [...contextChain];
+  // 5. 跳过隐藏元素
+  if (isHidden(element)) return;
 
-  const section = heading || parentSection;
+  // 6. 更新上下文链：标题作为 section
+  let newSection = section;
+  const newContextChain = [...contextChain];
+  if (/^h[1-6]$/.test(tagName)) {
+    const headingText = element.textContent?.trim() || '';
+    if (headingText) {
+      newSection = headingText;
+      newContextChain.push(headingText);
+    }
+  }
 
-  // 检查是否为叶子文本容器（p, li, h1-h6, td 等）
-  if (isLeafTextContainer(element)) {
-    const unit = createUnit(element, section, newContextChain, isInShadowDOM, isInIframe, config);
-    if (unit) result.push(unit);
+  // 7. 判断是否为叶子：无子元素的文本节点
+  const childElements = getChildElements(element);
+
+  if (childElements.length === 0) {
+    // 叶子节点：直接提取文本
+    tryCreateUnit(element, newSection, newContextChain, result);
     return;
   }
 
-  // 递归扫描子元素
-  const children = element.children;
-  for (let i = 0; i < children.length; i++) {
-    const child = children[i] as HTMLElement;
-    scanElement(child, section, newContextChain, isInShadowDOM, isInIframe, config, result);
+  // 8. 有子元素时：逐层递归深入
+  //    不再使用 BLOCK_CONTAINER_SELECTORS 判断是否跳过父级
+  //    而是递归进入每个子元素，确保内部 p/li/a 等全部被扫描
+  for (const child of childElements) {
+    scanElement(child, newSection, newContextChain, result);
   }
 }
 
 /**
- * 判断元素是否应被排除
+ * 获取元素的直接子元素（过滤空文本节点）
  */
-function shouldExclude(element: HTMLElement): boolean {
-  const tagName = element.tagName.toLowerCase();
-
-  // 检查标签名
-  for (const selector of EXCLUDE_SELECTORS) {
-    if (selector.startsWith('.') || selector.startsWith('#') || selector.startsWith('[')) {
-      // CSS 类/ID 选择器
-      if (element.matches(selector)) return true;
-    } else if (selector === tagName) {
-      return true;
-    }
-  }
-
-  // 检查 data-dt-translated 或 dt-exclude 属性
-  if (element.hasAttribute('data-dt-exclude')) return true;
-
-  return false;
-}
-
-/**
- * 判断元素是否为代码块
- */
-function isCodeBlock(element: HTMLElement): boolean {
-  const tagName = element.tagName.toLowerCase();
-  return CODE_SELECTORS.includes(tagName);
-}
-
-/**
- * 判断元素是否为叶子文本容器
- * 只有当元素是 p/li/h1-h6/td 等块级文本元素时才返回 true
- * 如果元素内部仍有 p/li/h1-h6 等子文本容器，应跳过父级，只扫描子级
- */
-function isLeafTextContainer(element: HTMLElement): boolean {
-  const tagName = element.tagName.toLowerCase();
-
-  // 检查自身是否为块级容器
-  if (!BLOCK_CONTAINER_SELECTORS.includes(tagName)) return false;
-
-  // 如果内部还有块级容器子元素，不算叶子，应递归
-  for (const childSelector of BLOCK_CONTAINER_SELECTORS) {
-    if (element.querySelector(childSelector)) return false;
-  }
-
-  const text = getDirectText(element).trim();
-  return text.length > 0;
-}
-
-/**
- * 获取元素的直接纯文本（不含子元素标签）
- */
-function getDirectText(element: HTMLElement): string {
-  let text = '';
+function getChildElements(element: HTMLElement): HTMLElement[] {
+  const result: HTMLElement[] = [];
   for (const node of element.childNodes) {
-    if (node.nodeType === Node.TEXT_NODE) {
-      text += node.textContent || '';
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      result.push(node as HTMLElement);
     }
   }
-  return text;
+  return result;
 }
 
 /**
- * 获取元素完整 innerText（用于翻译）
+ * 尝试为叶子元素创建翻译单元
  */
-function getFullText(element: HTMLElement): string {
-  return element.innerText || element.textContent || '';
-}
+function tryCreateUnit(
+  element: HTMLElement,
+  section: string,
+  contextChain: string[],
+  result: TranslationUnit[]
+): void {
+  const text = getCleanText(element);
 
-/**
- * 尝试获取父级标题文本
- */
-function getHeadingText(element: HTMLElement): string | null {
+  // 过滤纯空白
+  if (!text) return;
+
+  // 过滤纯数字/符号/标点
+  if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(text)) return;
+
   const tagName = element.tagName.toLowerCase();
-  if (/^h[1-6]$/.test(tagName)) {
-    return element.textContent?.trim() || null;
-  }
-  return null;
+  const inViewport = isInViewport(element);
+  const priority = inViewport ? VIEWPORT_PRIORITY : 0;
+
+  const unit: TranslationUnit = {
+    id: `dt-${++idCounter}`,
+    type: determineUnitType(tagName),
+    element,
+    originalText: text,
+    htmlContext: tagName,
+    contextChain: section ? [section, ...contextChain] : contextChain,
+    isInShadowDOM: false,
+    isInIframe: false,
+    priority,
+  };
+
+  result.push(unit);
+}
+
+/**
+ * 获取元素纯净文本（innerText，去除多余空白）
+ */
+function getCleanText(element: HTMLElement): string {
+  const raw = element.innerText || element.textContent || '';
+  return raw
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * 判断元素类型
+ */
+function determineUnitType(tagName: string): UnitType {
+  if (/^h[1-6]$/.test(tagName)) return 'heading';
+  if (tagName === 'p') return 'paragraph';
+  if (tagName === 'li') return 'list_item';
+  if (tagName === 'td' || tagName === 'th') return 'table_cell';
+  if (tagName === 'figcaption' || tagName === 'caption') return 'caption';
+  if (tagName === 'a' || tagName === 'button') return 'navigation';
+  return 'paragraph';
 }
 
 /**
@@ -184,60 +171,15 @@ function isInViewport(element: HTMLElement): boolean {
 }
 
 /**
- * 判断文本类型
+ * 判断元素是否隐藏（display:none 或 visibility:hidden）
  */
-function determineUnitType(element: HTMLElement): UnitType {
-  const tagName = element.tagName.toLowerCase();
-
-  if (/^h[1-6]$/.test(tagName)) return 'heading';
-  if (tagName === 'p') return 'paragraph';
-  if (tagName === 'li') return 'list_item';
-  if (tagName === 'td' || tagName === 'th') return 'table_cell';
-  if (tagName === 'figcaption' || tagName === 'caption') return 'caption';
-  if (tagName === 'a' || tagName === 'button' || tagName === 'span') return 'navigation';
-
-  return 'paragraph';
+function isHidden(element: HTMLElement): boolean {
+  const style = window.getComputedStyle(element);
+  return style.display === 'none' || style.visibility === 'hidden';
 }
 
 /**
- * 创建 TranslationUnit
- */
-function createUnit(
-  element: HTMLElement,
-  section: string | null,
-  contextChain: string[],
-  isInShadowDOM: boolean,
-  isInIframe: boolean,
-  config: ScannerConfig
-): TranslationUnit | null {
-  const text = getFullText(element).trim();
-
-  // 过滤过短文本
-  if (text.length < config.minTextLength) return null;
-
-  // 过滤纯数字/符号
-  if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(text)) return null;
-
-  const inViewport = isInViewport(element);
-  const priority = inViewport ? config.viewportPriorityBonus : 0;
-
-  const unit: TranslationUnit = {
-    id: `dt-${++idCounter}`,
-    type: determineUnitType(element),
-    element,
-    originalText: text,
-    htmlContext: element.tagName.toLowerCase(),
-    contextChain: section ? [section, ...contextChain] : contextChain,
-    isInShadowDOM,
-    isInIframe,
-    priority,
-  };
-
-  return unit;
-}
-
-/**
- * 重置 ID 计数器（测试用）
+ * 重置 ID 计数器
  */
 export function resetCounter(): void {
   idCounter = 0;
