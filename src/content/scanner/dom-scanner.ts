@@ -44,6 +44,44 @@ const SKIP_CLASS_KEYWORDS = [
  */
 const SEMANTIC_INLINE_TAGS = new Set(['a', 'sup', 'sub', 'code']);
 
+/**
+ * 块级标签：作为翻译单元切割边界
+ * 行内元素（span/em/strong/label 等）不切割句子，递归深挖到最内层
+ */
+const BLOCK_TAGS = new Set([
+  'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'li', 'section', 'article', 'main', 'aside',
+  'td', 'th', 'tr', 'table', 'blockquote',
+  'ul', 'ol', 'dl', 'dt', 'dd', 'figcaption', 'caption',
+  'summary', 'form', 'fieldset', 'details',
+]);
+
+/** 单翻译单元最大字符数（防 token 爆炸） */
+const MAX_UNIT_TEXT_LENGTH = 800;
+
+/** 判断元素是否为块级（标签名优先，兜底用 getComputedStyle） */
+function isBlockElement(el: HTMLElement): boolean {
+  if (BLOCK_TAGS.has(el.tagName.toLowerCase())) return true;
+  // 仅对未知标签查 computed style
+  try {
+    const d = window.getComputedStyle(el).display;
+    return d === 'block' || d === 'list-item' || d === 'table' ||
+           d === 'table-cell' || d === 'flex' || d === 'grid';
+  } catch {
+    return false;
+  }
+}
+
+/** 向上查找最近的块级祖先，用于将文本归组到同一翻译单元 */
+function getBlockAncestor(el: HTMLElement): HTMLElement {
+  let current: HTMLElement | null = el;
+  while (current && current !== document.body && current !== document.documentElement) {
+    if (isBlockElement(current)) return current;
+    current = current.parentElement;
+  }
+  return el; // 兜底返回自身
+}
+
 /** hasPreAncestor 结果缓存（WeakMap 避免内存泄漏，元素移出 DOM 自动回收） */
 const preAncestorCache = new WeakMap<HTMLElement, boolean>();
 
@@ -143,7 +181,7 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
     }
   );
 
-  // 收集文本节点，按父元素分组（<a> 内部文本已被排除）
+  // 收集文本节点，按块级祖先分组（行内容器不切割句子流）
   let textNode: Text | null;
   while ((textNode = walker.nextNode() as Text | null)) {
     const raw = (textNode.textContent || '').replace(/\s+/g, ' ').trim();
@@ -154,12 +192,16 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
     // 过滤纯数字/符号/标点
     if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(raw)) continue;
 
-    const parent = textNode.parentElement;
-    if (!parent) continue;
-    if (parent.hasAttribute('data-dt-translated')) continue;
+    const rawParent = textNode.parentElement;
+    if (!rawParent) continue;
+    if (rawParent.hasAttribute('data-dt-translated')) continue;
 
-    // 父元素本身是跳过标签 → 丢弃
-    if (SKIP_CONTAINER_TAGS.has(parent.tagName.toLowerCase())) continue;
+    // 直接父元素是跳过容器标签 → 丢弃
+    if (SKIP_CONTAINER_TAGS.has(rawParent.tagName.toLowerCase())) continue;
+
+    // FIX: 向根方向查找块级祖先；跨 span/em/label 等行内容器，同一句子归到同一单元
+    const parent = getBlockAncestor(rawParent);
+    if (parent.hasAttribute('data-dt-translated')) continue;
 
     if (!parentMap.has(parent)) {
       parentMap.set(parent, []);
@@ -167,22 +209,26 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
     parentMap.get(parent)!.push(raw);
   }
 
-  // 组装 TranslationUnit：使用占位符序列化保留 <a> 完整性
+  // 组装 TranslationUnit：使用占位符序列化，块级祖先合并句子
   const units: TranslationUnit[] = [];
   const processedElements = new Set<HTMLElement>();
 
   for (const [parent] of parentMap) {
-    // 检查祖先链是否已处理（避免 <p> 的 text 被包含到父 <div> 中重复处理）
     if (processedElements.has(parent)) continue;
 
     const tagName = parent.tagName.toLowerCase();
 
-    // 使用占位符序列化：childNodes 中的 <a> 生成 {{TAG_N}} 占位符
+    // 使用占位符序列化：递归深挖行内元素，<a>/<code> 生成 {{TAG_N}} 占位符
     const { text, refs } = serializeWithPlaceholders(parent);
 
     // 去掉占位符后的纯文本长度检查
     const plainText = text.replace(/\{\{TAG_\d+\}\}/g, '').replace(/\s+/g, ' ').trim();
     if (plainText.length < 8) continue;
+
+    // 长度上限保护：超过阈值强制截断，防单请求 token 爆炸
+    const finalText = text.length > MAX_UNIT_TEXT_LENGTH
+      ? text.substring(0, MAX_UNIT_TEXT_LENGTH) + '...'
+      : text;
 
     const inViewport = isInViewport(parent);
 
@@ -190,7 +236,7 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
       id: `dt-${++idCounter}`,
       type: determineUnitType(tagName),
       element: parent,
-      originalText: text,
+      originalText: finalText,
       htmlContext: tagName,
       contextChain: buildContextChain(parent),
       isInShadowDOM: false,
@@ -207,20 +253,16 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
 }
 
 /**
- * 序列化父容器文本，将语义行内元素替换为 {{TAG_N}} 占位符
+ * 序列化块级容器内文本，递归深挖行内子元素
  *
- * 遍历父容器的直接子节点（childNodes）：
+ * 只切割块级子元素边界；行内子元素（span/em/strong/label 等）递归展开，
+ * 确保 <span>...<code>A</code>...<a>B</a>...</span> 这类嵌套行内结构
+ * 中的 <code>/<a> 占位符不被 innerText 吞没，完整句子不拆成多段。
+ *
  * - Text 节点 → 直接拼接
- * - <a>/<sup>/<sub> → 生成 {{TAG_N}} 占位符，保存原始 DOM 引用
- * - <code> 无 <pre> 祖先 → 行内代码，生成占位符保留原样
- * - <code> 有 <pre> 祖先 → 块级代码，跳过
- * - pre → 跳过整棵子树（FILTER_REJECT 等效）
- * - script/style/iframe/svg → 跳过
- * - br → 空格
- * - 其他元素 → 提取 innerText
- *
- * 占位符不含元素文字，LLM 看到的是纯占位符标记，
- * 确保 LLM 不会修改/撕裂行内元素的内容。
+ * - <a>/<sup>/<sub>/<code> → 生成 {{TAG_N}} 占位符
+ * - 块级子元素 → 提取 innerText 但不递归（它会在 getBlockAncestor 中独立成单元）
+ * - 其他行内元素 → 递归 walk()
  */
 function serializeWithPlaceholders(
   element: HTMLElement
@@ -229,41 +271,39 @@ function serializeWithPlaceholders(
   const refs: InlineElementRef[] = [];
   let tagIdx = 0;
 
-  for (const child of element.childNodes) {
-    if (child.nodeType === Node.TEXT_NODE) {
-      result += child.textContent || '';
-    } else if (child.nodeType === Node.ELEMENT_NODE) {
-      const el = child as HTMLElement;
-      const tag = el.tagName.toLowerCase();
+  function walk(el: HTMLElement): void {
+    for (const child of el.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        result += child.textContent || '';
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const childEl = child as HTMLElement;
+        const tag = childEl.tagName.toLowerCase();
 
-      // 跳过隐藏元素（display:none / hidden），减少无用占位符
-      if (isElementHidden(el)) continue;
+        if (isElementHidden(childEl)) continue;
+        if (tag === 'pre') return; // FILTER_REJECT 整棵子树
+        if (SKIP_TAGS.has(tag)) return;
 
-      // pre 整棵子树跳过（FILTER_REJECT 等效）
-      if (tag === 'pre') continue;
-
-      if (SKIP_TAGS.has(tag)) continue;
-
-      // 语义行内标签：整体占位，不拆分内部文本
-      if (SEMANTIC_INLINE_TAGS.has(tag)) {
-        // code 有 pre 祖先 → 块级代码，跳过（FILTER_REJECT）
-        if (tag === 'code' && hasPreAncestor(el)) continue;
-
-        const placeholder = `{{TAG_${tagIdx}}}`;
-        const innerText = (el.innerText || el.textContent || '').trim();
-        refs.push({ placeholder, element: el, originalText: innerText });
-        // 占位符两侧加空格，确保 LLM 识别为独立 token
-        result += ` {{TAG_${tagIdx}}} `;
-        tagIdx++;
-      } else if (tag === 'br') {
-        result += ' ';
-      } else {
-        // 其他元素：提取文本，不展开子结构
-        result += el.innerText || el.textContent || '';
+        if (SEMANTIC_INLINE_TAGS.has(tag)) {
+          if (tag === 'code' && hasPreAncestor(childEl)) return;
+          const placeholder = `{{TAG_${tagIdx}}}`;
+          const innerText = (childEl.innerText || childEl.textContent || '').trim();
+          refs.push({ placeholder, element: childEl, originalText: innerText });
+          result += ` {{TAG_${tagIdx}}} `;
+          tagIdx++;
+        } else if (tag === 'br') {
+          result += ' ';
+        } else if (isBlockElement(childEl)) {
+          // 块级子元素：提取 innerText 不递归（它是独立翻译单元边界）
+          result += (childEl.innerText || childEl.textContent || '') + ' ';
+        } else {
+          // 行内子元素（span/em/strong/label 等）：递归深入
+          walk(childEl);
+        }
       }
     }
   }
 
+  walk(element);
   return {
     text: result.replace(/\s+/g, ' ').trim(),
     refs,

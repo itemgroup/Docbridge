@@ -48,6 +48,55 @@
     "share"
   ];
   const SEMANTIC_INLINE_TAGS = /* @__PURE__ */ new Set(["a", "sup", "sub", "code"]);
+  const BLOCK_TAGS = /* @__PURE__ */ new Set([
+    "p",
+    "div",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
+    "section",
+    "article",
+    "main",
+    "aside",
+    "td",
+    "th",
+    "tr",
+    "table",
+    "blockquote",
+    "ul",
+    "ol",
+    "dl",
+    "dt",
+    "dd",
+    "figcaption",
+    "caption",
+    "summary",
+    "form",
+    "fieldset",
+    "details"
+  ]);
+  const MAX_UNIT_TEXT_LENGTH = 800;
+  function isBlockElement(el) {
+    if (BLOCK_TAGS.has(el.tagName.toLowerCase())) return true;
+    try {
+      const d = window.getComputedStyle(el).display;
+      return d === "block" || d === "list-item" || d === "table" || d === "table-cell" || d === "flex" || d === "grid";
+    } catch {
+      return false;
+    }
+  }
+  function getBlockAncestor(el) {
+    let current = el;
+    while (current && current !== document.body && current !== document.documentElement) {
+      if (isBlockElement(current)) return current;
+      current = current.parentElement;
+    }
+    return el;
+  }
   const preAncestorCache = /* @__PURE__ */ new WeakMap();
   function hasPreAncestor(element) {
     const cached = preAncestorCache.get(element);
@@ -112,10 +161,12 @@
       const raw = (textNode.textContent || "").replace(/\s+/g, " ").trim();
       if (raw.length < 8) continue;
       if (/^[\d\s.,;:!?\-–—()\[\]{}"'«»<>+=\/*@#$%^&~`|\\]+$/.test(raw)) continue;
-      const parent = textNode.parentElement;
-      if (!parent) continue;
+      const rawParent = textNode.parentElement;
+      if (!rawParent) continue;
+      if (rawParent.hasAttribute("data-dt-translated")) continue;
+      if (SKIP_CONTAINER_TAGS.has(rawParent.tagName.toLowerCase())) continue;
+      const parent = getBlockAncestor(rawParent);
       if (parent.hasAttribute("data-dt-translated")) continue;
-      if (SKIP_CONTAINER_TAGS.has(parent.tagName.toLowerCase())) continue;
       if (!parentMap.has(parent)) {
         parentMap.set(parent, []);
       }
@@ -129,12 +180,13 @@
       const { text, refs } = serializeWithPlaceholders(parent);
       const plainText = text.replace(/\{\{TAG_\d+\}\}/g, "").replace(/\s+/g, " ").trim();
       if (plainText.length < 8) continue;
+      const finalText = text.length > MAX_UNIT_TEXT_LENGTH ? text.substring(0, MAX_UNIT_TEXT_LENGTH) + "..." : text;
       const inViewport = isInViewport(parent);
       const unit = {
         id: `dt-${++idCounter}`,
         type: determineUnitType(tagName),
         element: parent,
-        originalText: text,
+        originalText: finalText,
         htmlContext: tagName,
         contextChain: buildContextChain(parent),
         isInShadowDOM: false,
@@ -151,29 +203,34 @@
     let result = "";
     const refs = [];
     let tagIdx = 0;
-    for (const child of element.childNodes) {
-      if (child.nodeType === Node.TEXT_NODE) {
-        result += child.textContent || "";
-      } else if (child.nodeType === Node.ELEMENT_NODE) {
-        const el = child;
-        const tag = el.tagName.toLowerCase();
-        if (isElementHidden(el)) continue;
-        if (tag === "pre") continue;
-        if (SKIP_TAGS.has(tag)) continue;
-        if (SEMANTIC_INLINE_TAGS.has(tag)) {
-          if (tag === "code" && hasPreAncestor(el)) continue;
-          const placeholder = `{{TAG_${tagIdx}}}`;
-          const innerText = (el.innerText || el.textContent || "").trim();
-          refs.push({ placeholder, element: el, originalText: innerText });
-          result += ` {{TAG_${tagIdx}}} `;
-          tagIdx++;
-        } else if (tag === "br") {
-          result += " ";
-        } else {
-          result += el.innerText || el.textContent || "";
+    function walk(el) {
+      for (const child of el.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          result += child.textContent || "";
+        } else if (child.nodeType === Node.ELEMENT_NODE) {
+          const childEl = child;
+          const tag = childEl.tagName.toLowerCase();
+          if (isElementHidden(childEl)) continue;
+          if (tag === "pre") return;
+          if (SKIP_TAGS.has(tag)) return;
+          if (SEMANTIC_INLINE_TAGS.has(tag)) {
+            if (tag === "code" && hasPreAncestor(childEl)) return;
+            const placeholder = `{{TAG_${tagIdx}}}`;
+            const innerText = (childEl.innerText || childEl.textContent || "").trim();
+            refs.push({ placeholder, element: childEl, originalText: innerText });
+            result += ` {{TAG_${tagIdx}}} `;
+            tagIdx++;
+          } else if (tag === "br") {
+            result += " ";
+          } else if (isBlockElement(childEl)) {
+            result += (childEl.innerText || childEl.textContent || "") + " ";
+          } else {
+            walk(childEl);
+          }
         }
       }
     }
+    walk(element);
     return {
       text: result.replace(/\s+/g, " ").trim(),
       refs
