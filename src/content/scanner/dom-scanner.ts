@@ -44,13 +44,30 @@ const SKIP_CLASS_KEYWORDS = [
  */
 const SEMANTIC_INLINE_TAGS = new Set(['a', 'sup', 'sub', 'code']);
 
-/** 检查元素是否有 <pre> 祖先（用于区分块级代码 vs 行内代码） */
+/** hasPreAncestor 结果缓存（WeakMap 避免内存泄漏，元素移出 DOM 自动回收） */
+const preAncestorCache = new WeakMap<HTMLElement, boolean>();
+
+/** 检查元素是否有 <pre> 祖先（带缓存，避免重复遍历祖先链） */
 function hasPreAncestor(element: HTMLElement): boolean {
+  const cached = preAncestorCache.get(element);
+  if (cached !== undefined) return cached;
   let parent: HTMLElement | null = element.parentElement;
   while (parent) {
-    if (parent.tagName.toLowerCase() === 'pre') return true;
+    if (parent.tagName.toLowerCase() === 'pre') {
+      preAncestorCache.set(element, true);
+      return true;
+    }
     parent = parent.parentElement;
   }
+  preAncestorCache.set(element, false);
+  return false;
+}
+
+/** 检查元素是否为隐藏（仅读 inline style + hidden 属性，不做昂贵的 getComputedStyle） */
+function isElementHidden(el: HTMLElement): boolean {
+  if (el.hidden) return true;
+  const s = el.style;
+  if (s.display === 'none' || s.visibility === 'hidden') return true;
   return false;
 }
 
@@ -101,16 +118,24 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
     NodeFilter.SHOW_TEXT,
     {
       acceptNode: (node: Text): number => {
+        // 提前过滤纯空白节点（仅空格/换行/制表符），减少后续处理
+        const rawText = node.textContent || '';
+        if (!rawText.trim()) return NodeFilter.FILTER_REJECT;
+
         if (isInsideSkippedArea(node)) return NodeFilter.FILTER_REJECT;
 
-        // FIX: 跳过 <a>/<sup>/<sub> 内部的 Text 节点，防止链接被切割
-        // 这些语义行内元素将在 serializeWithPlaceholders 中作为整体占位符处理
+        // 跳过 display:none / hidden 隐藏元素的内部 Text
         const directParent = node.parentElement;
+        if (directParent && isElementHidden(directParent)) {
+          return NodeFilter.FILTER_REJECT;
+        }
+
+        // FIX: 跳过 <a>/<sup>/<sub>/<code> 内部的 Text 节点，防止切割
         if (directParent && SEMANTIC_INLINE_TAGS.has(directParent.tagName.toLowerCase())) {
           return NodeFilter.FILTER_REJECT;
         }
 
-        const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+        const text = rawText.replace(/\s+/g, ' ').trim();
         if (!text) return NodeFilter.FILTER_REJECT;
 
         return NodeFilter.FILTER_ACCEPT;
@@ -210,6 +235,9 @@ function serializeWithPlaceholders(
     } else if (child.nodeType === Node.ELEMENT_NODE) {
       const el = child as HTMLElement;
       const tag = el.tagName.toLowerCase();
+
+      // 跳过隐藏元素（display:none / hidden），减少无用占位符
+      if (isElementHidden(el)) continue;
 
       // pre 整棵子树跳过（FILTER_REJECT 等效）
       if (tag === 'pre') continue;

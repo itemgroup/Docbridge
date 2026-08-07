@@ -48,12 +48,25 @@
     "share"
   ];
   const SEMANTIC_INLINE_TAGS = /* @__PURE__ */ new Set(["a", "sup", "sub", "code"]);
+  const preAncestorCache = /* @__PURE__ */ new WeakMap();
   function hasPreAncestor(element) {
+    const cached = preAncestorCache.get(element);
+    if (cached !== void 0) return cached;
     let parent = element.parentElement;
     while (parent) {
-      if (parent.tagName.toLowerCase() === "pre") return true;
+      if (parent.tagName.toLowerCase() === "pre") {
+        preAncestorCache.set(element, true);
+        return true;
+      }
       parent = parent.parentElement;
     }
+    preAncestorCache.set(element, false);
+    return false;
+  }
+  function isElementHidden(el) {
+    if (el.hidden) return true;
+    const s = el.style;
+    if (s.display === "none" || s.visibility === "hidden") return true;
     return false;
   }
   const VIEWPORT_PRIORITY = 10;
@@ -78,12 +91,17 @@
       NodeFilter.SHOW_TEXT,
       {
         acceptNode: (node) => {
+          const rawText = node.textContent || "";
+          if (!rawText.trim()) return NodeFilter.FILTER_REJECT;
           if (isInsideSkippedArea(node)) return NodeFilter.FILTER_REJECT;
           const directParent = node.parentElement;
+          if (directParent && isElementHidden(directParent)) {
+            return NodeFilter.FILTER_REJECT;
+          }
           if (directParent && SEMANTIC_INLINE_TAGS.has(directParent.tagName.toLowerCase())) {
             return NodeFilter.FILTER_REJECT;
           }
-          const text = (node.textContent || "").replace(/\s+/g, " ").trim();
+          const text = rawText.replace(/\s+/g, " ").trim();
           if (!text) return NodeFilter.FILTER_REJECT;
           return NodeFilter.FILTER_ACCEPT;
         }
@@ -139,6 +157,7 @@
       } else if (child.nodeType === Node.ELEMENT_NODE) {
         const el = child;
         const tag = el.tagName.toLowerCase();
+        if (isElementHidden(el)) continue;
         if (tag === "pre") continue;
         if (SKIP_TAGS.has(tag)) continue;
         if (SEMANTIC_INLINE_TAGS.has(tag)) {
@@ -207,7 +226,7 @@
     return rect.top < window.innerHeight && rect.bottom > 0 && rect.left < window.innerWidth && rect.right > 0;
   }
   const MAX_BATCH_SIZE = 50;
-  const MAX_CONCURRENT_REQUESTS = 5;
+  const MAX_CONCURRENT_REQUESTS = 3;
   const BATCH_INTERVAL_MS = 20;
   const DOM_DEBOUNCE_MS = 350;
   function buildBatches(units) {
@@ -3695,6 +3714,64 @@
   `;
     document.head.appendChild(style);
   }
+  const PROGRESS_BAR_ID = "dt-progress-bar";
+  let destroyTimerId = null;
+  function initProgressBar(total) {
+    if (total <= 0) return;
+    if (destroyTimerId) {
+      clearTimeout(destroyTimerId);
+      destroyTimerId = null;
+    }
+    const existing = document.getElementById(PROGRESS_BAR_ID);
+    if (existing) {
+      const fill2 = document.getElementById("dt-progress-fill");
+      if (fill2) fill2.style.width = "0%";
+      const label2 = document.getElementById("dt-progress-label");
+      if (label2) label2.textContent = `翻译中 0% (0/${total})`;
+      return;
+    }
+    const bar = document.createElement("div");
+    bar.id = PROGRESS_BAR_ID;
+    bar.style.cssText = "position:fixed;bottom:0;left:0;right:0;z-index:99999;height:28px;display:flex;align-items:center;font-family:sans-serif;font-size:12px;color:#fff;pointer-events:none;";
+    const track = document.createElement("div");
+    track.style.cssText = "position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);";
+    const fill = document.createElement("div");
+    fill.id = "dt-progress-fill";
+    fill.style.cssText = "position:absolute;top:0;left:0;bottom:0;width:0%;background:#1890ff;transition:width 0.3s ease;";
+    const label = document.createElement("span");
+    label.id = "dt-progress-label";
+    label.style.cssText = "position:relative;z-index:1;padding:0 12px;white-space:nowrap;";
+    label.textContent = `翻译中 0% (0/${total})`;
+    bar.appendChild(track);
+    bar.appendChild(fill);
+    bar.appendChild(label);
+    document.body.appendChild(bar);
+  }
+  function updateTranslateProgress(finished, total) {
+    const bar = document.getElementById(PROGRESS_BAR_ID);
+    if (!bar || total <= 0) return;
+    const percent = Math.min(100, Math.round(finished / total * 100));
+    const fill = document.getElementById("dt-progress-fill");
+    if (fill) fill.style.width = `${percent}%`;
+    const label = document.getElementById("dt-progress-label");
+    if (label) {
+      label.textContent = `翻译中 ${percent}% (${finished}/${total})`;
+    }
+  }
+  function destroyProgressBar(delayMs = 0) {
+    if (destroyTimerId) clearTimeout(destroyTimerId);
+    destroyTimerId = null;
+    const remove2 = () => {
+      const bar = document.getElementById(PROGRESS_BAR_ID);
+      if (bar) bar.remove();
+      destroyTimerId = null;
+    };
+    if (delayMs > 0) {
+      destroyTimerId = setTimeout(remove2, delayMs);
+    } else {
+      remove2();
+    }
+  }
   let currentMode = "bilingual";
   let isTranslating = false;
   let isLocked = false;
@@ -3761,6 +3838,12 @@
       }
       console.log(`[DocBridge] 发现 ${units.length} 个翻译单元`);
       await processUnits(units);
+      if (pendingNewNodes.length > 0) {
+        console.log(`[DocBridge] 主轮完成，翻译期间新增 ${pendingNewNodes.length} 个待处理节点`);
+        await handleIncrementalScan();
+      } else {
+        destroyProgressBar(1200);
+      }
     } finally {
       isTranslating = false;
       isLocked = false;
@@ -3768,13 +3851,16 @@
   }
   async function processUnits(units) {
     const batches = buildBatches(units);
-    console.log(`[DocBridge] 分为 ${batches.length} 个批次`);
+    const total = units.length;
+    console.log(`[DocBridge] 分为 ${batches.length} 个批次，共 ${total} 个单元`);
+    initProgressBar(total);
     translatedResults = [];
     await new Promise((resolve) => {
       queue.start(
         batches,
-        (completed, total) => {
-          console.log(`[DocBridge] 翻译进度: ${completed}/${total}`);
+        (completed, total_) => {
+          updateTranslateProgress(completed, total_);
+          console.log(`[DocBridge] 翻译进度: ${completed}/${total_}`);
         },
         (results) => {
           translatedResults = results;
@@ -3787,7 +3873,7 @@
         }
       );
     });
-    console.log(`[DocBridge] 翻译完成，共 ${translatedResults.length} 条`);
+    console.log(`[DocBridge] 本轮完成，共 ${translatedResults.length} 条`);
   }
   function ensureRendered(results) {
     for (const unit of results) {
@@ -3800,7 +3886,6 @@
   function startMutationObserver() {
     if (observer) return;
     observer = new MutationObserver((mutations) => {
-      if (isLocked || isTranslating) return;
       let hasNewContent = false;
       for (const mutation of mutations) {
         if (mutation.type === "childList") {
@@ -3808,7 +3893,7 @@
             if (node.nodeType === Node.ELEMENT_NODE) {
               const el = node;
               if (el.classList.contains("dt-bridge")) continue;
-              if (el.id === "dt-floating-bar") continue;
+              if (el.id && el.id.startsWith("dt-")) continue;
               pendingNewNodes.push(el);
               hasNewContent = true;
             }
@@ -3816,6 +3901,7 @@
         }
       }
       if (!hasNewContent) return;
+      if (isLocked || isTranslating) return;
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         handleIncrementalScan();
@@ -3827,28 +3913,52 @@
     });
   }
   async function handleIncrementalScan() {
-    if (pendingNewNodes.length === 0) return;
     if (isTranslating) return;
-    const nodes = pendingNewNodes;
-    pendingNewNodes = [];
-    console.log(`[DocBridge] 检测到 ${nodes.length} 个新增节点，增量扫描...`);
-    const liveNodes = nodes.filter((n) => n.isConnected);
-    if (liveNodes.length === 0) return;
+    let hadWork = false;
     try {
-      const allUnits = [];
-      for (const node of liveNodes) {
-        const units = await scanPage(node);
-        allUnits.push(...units);
+      while (pendingNewNodes.length > 0) {
+        isTranslating = true;
+        isLocked = true;
+        const nodes = pendingNewNodes;
+        pendingNewNodes = [];
+        const liveNodes = nodes.filter((n) => n.isConnected);
+        if (liveNodes.length === 0) {
+          isTranslating = false;
+          isLocked = false;
+          continue;
+        }
+        const allUnits = [];
+        for (const node of liveNodes) {
+          const units = await scanPage(node);
+          allUnits.push(...units);
+        }
+        if (allUnits.length === 0) {
+          isTranslating = false;
+          isLocked = false;
+          continue;
+        }
+        const newUnits = allUnits.filter(
+          (u) => !u.element.hasAttribute("data-dt-translated")
+        );
+        if (newUnits.length === 0) {
+          isTranslating = false;
+          isLocked = false;
+          continue;
+        }
+        console.log(`[DocBridge] 本轮增量: ${newUnits.length} 个新翻译单元`);
+        await processUnits(newUnits);
+        isTranslating = false;
+        isLocked = false;
+        hadWork = true;
       }
-      if (allUnits.length === 0) return;
-      console.log(`[DocBridge] 增量发现 ${allUnits.length} 个新翻译单元`);
-      const newUnits = allUnits.filter(
-        (u) => !u.element.hasAttribute("data-dt-translated")
-      );
-      if (newUnits.length === 0) return;
-      await processUnits(newUnits);
     } catch (error) {
       console.error("[DocBridge] 增量扫描失败:", error);
+    } finally {
+      isTranslating = false;
+      isLocked = false;
+    }
+    if (hadWork) {
+      destroyProgressBar(1200);
     }
   }
   function createFloatingBar() {

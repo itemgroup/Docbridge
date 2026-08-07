@@ -4,6 +4,7 @@ import { scanPage } from './scanner/dom-scanner';
 import { buildBatches } from './analyzer/unit-builder';
 import { TranslationQueue } from './translator/translation-queue';
 import { renderTranslation, applyDisplayMode, clearTranslation, exportHTML, injectGlobalStyles } from './renderer/dom-renderer';
+import { initProgressBar, updateTranslateProgress, destroyProgressBar } from './ui/progress-bar';
 import { DOM_DEBOUNCE_MS } from '../shared/constants';
 
 /** 当前显示模式 */
@@ -112,6 +113,15 @@ async function translatePage(): Promise<void> {
     console.log(`[DocBridge] 发现 ${units.length} 个翻译单元`);
 
     await processUnits(units);
+
+    // 主轮完成后，检查翻译期间是否有增量节点被缓存
+    if (pendingNewNodes.length > 0) {
+      console.log(`[DocBridge] 主轮完成，翻译期间新增 ${pendingNewNodes.length} 个待处理节点`);
+      // isTranslating/isLocked 已在 finally 中重置，handleIncrementalScan 可直接调用
+      await handleIncrementalScan();
+    } else {
+      destroyProgressBar(1200);
+    }
   } finally {
     isTranslating = false;
     isLocked = false;
@@ -123,15 +133,20 @@ async function translatePage(): Promise<void> {
  */
 async function processUnits(units: TranslationUnit[]): Promise<void> {
   const batches = buildBatches(units);
-  console.log(`[DocBridge] 分为 ${batches.length} 个批次`);
+  const total = units.length;
+  console.log(`[DocBridge] 分为 ${batches.length} 个批次，共 ${total} 个单元`);
+
+  // [进度条] 初始化：总任务数 > 0 时在页面底部创建进度条
+  initProgressBar(total);
 
   translatedResults = [];
 
   await new Promise<void>((resolve) => {
     queue.start(
       batches,
-      (completed, total) => {
-        console.log(`[DocBridge] 翻译进度: ${completed}/${total}`);
+      (completed, total_) => {
+        updateTranslateProgress(completed, total_);
+        console.log(`[DocBridge] 翻译进度: ${completed}/${total_}`);
       },
       (results) => {
         translatedResults = results;
@@ -145,7 +160,7 @@ async function processUnits(units: TranslationUnit[]): Promise<void> {
     );
   });
 
-  console.log(`[DocBridge] 翻译完成，共 ${translatedResults.length} 条`);
+  console.log(`[DocBridge] 本轮完成，共 ${translatedResults.length} 条`);
 }
 
 /**
@@ -168,10 +183,7 @@ function startMutationObserver(): void {
   if (observer) return;
 
   observer = new MutationObserver((mutations) => {
-    // 队列运行中 → 跳过，不追加大批量新任务
-    if (isLocked || isTranslating) return;
-
-    // 收集新增的有效元素节点
+    // 始终收集新增有效节点（即使翻译进行中，缓存到 pendingNewNodes 等待消费）
     let hasNewContent = false;
     for (const mutation of mutations) {
       if (mutation.type === 'childList') {
@@ -179,7 +191,8 @@ function startMutationObserver(): void {
           if (node.nodeType === Node.ELEMENT_NODE) {
             const el = node as HTMLElement;
             if (el.classList.contains('dt-bridge')) continue;
-            if (el.id === 'dt-floating-bar') continue;
+            // 过滤插件自身的 UI 元素（进度条等），防止 DOM 变动触发无限递归扫描
+            if (el.id && el.id.startsWith('dt-')) continue;
             pendingNewNodes.push(el);
             hasNewContent = true;
           }
@@ -188,6 +201,9 @@ function startMutationObserver(): void {
     }
 
     if (!hasNewContent) return;
+
+    // 翻译进行中 → 节点已缓存到 pendingNewNodes，等当前轮完成后消费
+    if (isLocked || isTranslating) return;
 
     // 防抖：350ms 内多次 DOM 变动合并为一次
     if (debounceTimer) clearTimeout(debounceTimer);
@@ -203,44 +219,78 @@ function startMutationObserver(): void {
 }
 
 /**
- * 处理增量扫描：仅对新增 DOM 子树执行 TreeWalker
+ * 处理增量扫描：循环消费 pendingNewNodes 直到队列为空
+ * 每轮翻译期间 Observer 持续缓存新增节点 → 翻译完成后自动进入下一轮
+ * 全部消费完毕后销毁进度条
  */
 async function handleIncrementalScan(): Promise<void> {
-  if (pendingNewNodes.length === 0) return;
   if (isTranslating) return;
 
-  // 取出待处理节点并清空
-  const nodes = pendingNewNodes;
-  pendingNewNodes = [];
-
-  console.log(`[DocBridge] 检测到 ${nodes.length} 个新增节点，增量扫描...`);
-
-  // 筛选仍在 DOM 中的节点
-  const liveNodes = nodes.filter((n) => n.isConnected);
-  if (liveNodes.length === 0) return;
+  let hadWork = false;
 
   try {
-    // 对每个新增子树独立扫描
-    const allUnits: TranslationUnit[] = [];
-    for (const node of liveNodes) {
-      const units = await scanPage(node);
-      allUnits.push(...units);
+    // 循环处理，直到队列中没有更多待扫描节点
+    while (pendingNewNodes.length > 0) {
+      // [防重入] 每轮开始前锁定
+      isTranslating = true;
+      isLocked = true;
+
+      // 取出本轮节点并清空
+      const nodes = pendingNewNodes;
+      pendingNewNodes = [];
+
+      // 筛选仍在 DOM 中的节点
+      const liveNodes = nodes.filter((n) => n.isConnected);
+      if (liveNodes.length === 0) {
+        isTranslating = false;
+        isLocked = false;
+        continue;
+      }
+
+      // 对每个新增子树独立扫描
+      const allUnits: TranslationUnit[] = [];
+      for (const node of liveNodes) {
+        const units = await scanPage(node);
+        allUnits.push(...units);
+      }
+
+      if (allUnits.length === 0) {
+        isTranslating = false;
+        isLocked = false;
+        continue;
+      }
+
+      // 过滤已翻译
+      const newUnits = allUnits.filter(
+        (u) => !u.element.hasAttribute('data-dt-translated')
+      );
+
+      if (newUnits.length === 0) {
+        isTranslating = false;
+        isLocked = false;
+        continue;
+      }
+
+      console.log(`[DocBridge] 本轮增量: ${newUnits.length} 个新翻译单元`);
+
+      // 执行本轮翻译（processUnits 期间 Observer 继续缓存新增节点到 pendingNewNodes）
+      await processUnits(newUnits);
+
+      // 解锁 → 下一轮 while 迭代检查是否有新的缓存节点
+      isTranslating = false;
+      isLocked = false;
+      hadWork = true;
     }
-
-    if (allUnits.length === 0) return;
-
-    console.log(`[DocBridge] 增量发现 ${allUnits.length} 个新翻译单元`);
-
-    // 过滤已翻译
-    const newUnits = allUnits.filter(
-      (u) => !u.element.hasAttribute('data-dt-translated')
-    );
-
-    if (newUnits.length === 0) return;
-
-    await processUnits(newUnits);
   } catch (error) {
     console.error('[DocBridge] 增量扫描失败:', error);
+  } finally {
+    isTranslating = false;
+    isLocked = false;
+  }
+
+  // 全部增量消费完毕 → 销毁进度条
+  if (hadWork) {
+    destroyProgressBar(1200);
   }
 }
 

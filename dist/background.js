@@ -9,15 +9,7 @@
   const RETRY_BASE_DELAY_MS = 1e3;
   const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
   const TRANSLATION_SEPARATOR = "|||";
-  const TRANSLATION_SYSTEM_PROMPT = `你是专业技术文档翻译专家，将英文技术文档译为简体中文。
-规则：
-1. 信达雅，忠实原文；
-2. 保留术语：React/Vue/API/DOM/CSS/HTML/HTTP/URL/GitHub/JSON/TypeScript/JavaScript/Python/Docker/Kubernetes/Linux/Git/CLI/SDK/UI/UX/SQL/NoSQL/REST/GraphQL/WebSocket/OAuth/JWT/CI/CD/Hooks/middleware/debounce/throttle；
-3. 代码、变量、URL、命令行保持原样；
-4. 只翻译自然语言和注释；
-5. 【强制】{{TAG_0}} {{TAG_1}} 等 {{TAG_N}} 占位符代表超链接或行内元素，必须严格原样保留，不得修改、删除或翻译占位符的任何字符；
-6. {{TAG_N}} 也可能对应行内代码片段（如 <code>--pipeline_type LM</code>），占位符所在位置的代码内容必须原样保留在译文中，绝对不翻译。<｜end▁of▁thinking｜>5. 【强制】{{TAG_0}} {{TAG_1}} 等 {{TAG_N}} 占位符代表超链接或行内元素，必须严格原样保留，不得修改、删除或翻译占位符的任何字符；
-输出格式：UNIT_ID|||译文内容`;
+  const TRANSLATION_SYSTEM_PROMPT = `技术文档英译中。规则：1.信达雅；2.保留原样：代码/变量/URL/命令/React/Vue/API/DOM,CSS,HTML,HTTP,JSON,TS,JS,Python,Docker,CI/CD等术语；3.只译自然语言与注释；4.【强制】{{TAG_N}}占位符(链接或代码)原样保留不译。输出：UNIT_ID|||译文`;
   var commonjsGlobal = typeof globalThis !== "undefined" ? globalThis : typeof window !== "undefined" ? window : typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : {};
   function getDefaultExportFromCjs(x) {
     return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, "default") ? x["default"] : x;
