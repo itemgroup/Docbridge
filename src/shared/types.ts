@@ -16,6 +16,16 @@ export type UnitType =
 /** 显示模式 */
 export type DisplayMode = 'bilingual' | 'translated-only' | 'original-only';
 
+/** 行内元素占位引用（语义标签：a/sup/sub 整体占位，不拆分内部文本） */
+export interface InlineElementRef {
+  /** 占位符，如 {{TAG_0}} */
+  placeholder: string;
+  /** 原始 DOM 元素引用（渲染时深克隆，保留全部属性与子节点） */
+  element: HTMLElement;
+  /** 原始显示文本（仅用于参考，不发送给 LLM） */
+  originalText: string;
+}
+
 /** 翻译单元 - 扫描器输出 */
 export interface TranslationUnit {
   id: string;
@@ -27,6 +37,8 @@ export interface TranslationUnit {
   isInShadowDOM: boolean;
   isInIframe: boolean;
   priority: number;
+  /** 行内语义元素引用（占位符方案），如 a/sup/sub */
+  inlineRefs?: InlineElementRef[];
 }
 
 /** 已翻译单元 */

@@ -48,6 +48,7 @@
     "social",
     "share"
   ];
+  const SEMANTIC_INLINE_TAGS = /* @__PURE__ */ new Set(["a", "sup", "sub"]);
   const VIEWPORT_PRIORITY = 10;
   let idCounter = 0;
   async function scanPage(root) {
@@ -71,6 +72,10 @@
       {
         acceptNode: (node) => {
           if (isInsideSkippedArea(node)) return NodeFilter.FILTER_REJECT;
+          const directParent = node.parentElement;
+          if (directParent && SEMANTIC_INLINE_TAGS.has(directParent.tagName.toLowerCase())) {
+            return NodeFilter.FILTER_REJECT;
+          }
           const text = (node.textContent || "").replace(/\s+/g, " ").trim();
           if (!text) return NodeFilter.FILTER_REJECT;
           return NodeFilter.FILTER_ACCEPT;
@@ -92,25 +97,59 @@
       parentMap.get(parent).push(raw);
     }
     const units = [];
-    for (const [parent, texts] of parentMap) {
-      const combinedText = texts.join(" ");
-      if (combinedText.length < 8) continue;
+    const processedElements = /* @__PURE__ */ new Set();
+    for (const [parent] of parentMap) {
+      if (processedElements.has(parent)) continue;
       const tagName = parent.tagName.toLowerCase();
+      const { text, refs } = serializeWithPlaceholders(parent);
+      const plainText = text.replace(/\{\{TAG_\d+\}\}/g, "").replace(/\s+/g, " ").trim();
+      if (plainText.length < 8) continue;
       const inViewport = isInViewport(parent);
       const unit = {
         id: `dt-${++idCounter}`,
         type: determineUnitType(tagName),
         element: parent,
-        originalText: combinedText,
+        originalText: text,
         htmlContext: tagName,
         contextChain: buildContextChain(parent),
         isInShadowDOM: false,
         isInIframe: false,
-        priority: inViewport ? VIEWPORT_PRIORITY : 0
+        priority: inViewport ? VIEWPORT_PRIORITY : 0,
+        inlineRefs: refs.length > 0 ? refs : void 0
       };
       units.push(unit);
+      processedElements.add(parent);
     }
     return units;
+  }
+  function serializeWithPlaceholders(element) {
+    let result = "";
+    const refs = [];
+    let tagIdx = 0;
+    for (const child of element.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        result += child.textContent || "";
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const el = child;
+        const tag = el.tagName.toLowerCase();
+        if (SKIP_TAGS.has(tag)) continue;
+        if (SEMANTIC_INLINE_TAGS.has(tag)) {
+          const placeholder = `{{TAG_${tagIdx}}}`;
+          const innerText = (el.innerText || el.textContent || "").trim();
+          refs.push({ placeholder, element: el, originalText: innerText });
+          result += ` {{TAG_${tagIdx}}} `;
+          tagIdx++;
+        } else if (tag === "br") {
+          result += " ";
+        } else {
+          result += el.innerText || el.textContent || "";
+        }
+      }
+    }
+    return {
+      text: result.replace(/\s+/g, " ").trim(),
+      refs
+    };
   }
   function isInsideSkippedArea(node) {
     let parent = node.parentElement;
@@ -3556,13 +3595,34 @@
     applyDisplayMode(mode);
   }
   function createBridgeNode(unit) {
-    const { id, translatedText } = unit;
+    const { id, translatedText, originalUnit } = unit;
+    const inlineRefs = originalUnit.inlineRefs || [];
     const wrapper = document.createElement("span");
     wrapper.className = BRIDGE_CLASS;
     wrapper.setAttribute("data-dt-id", id);
     wrapper.style.cssText = "display:block;margin-top:6px;padding:6px 0 6px 10px;border-left:3px solid #1890ff;font-size:0.95em;line-height:1.6;color:#333;";
+    if (inlineRefs.length === 0) {
+      wrapper.title = translatedText;
+      wrapper.textContent = translatedText;
+      return wrapper;
+    }
+    const placeholderPattern = /(\{\{TAG_\d+\}\})/g;
+    const parts = translatedText.split(placeholderPattern);
+    for (const part of parts) {
+      if (!part) continue;
+      const match = part.match(/^\{\{TAG_(\d+)\}\}$/);
+      if (match) {
+        const idx = parseInt(match[1], 10);
+        const ref = inlineRefs[idx];
+        if (ref && ref.element) {
+          const clone = ref.element.cloneNode(true);
+          wrapper.appendChild(clone);
+        }
+      } else if (part.trim()) {
+        wrapper.appendChild(document.createTextNode(part));
+      }
+    }
     wrapper.title = translatedText;
-    wrapper.textContent = translatedText;
     return wrapper;
   }
   function applyDisplayMode(mode) {

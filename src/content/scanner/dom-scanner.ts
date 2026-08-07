@@ -1,5 +1,5 @@
-// DOM 扫描器 v5 | 正文区域限定 + UI 元素排除 + 文本长度过滤
-import type { TranslationUnit, UnitType } from '../../shared/types';
+// DOM 扫描器 v6 | TreeWalker + 占位符标记法（<a>整体不切割）
+import type { TranslationUnit, UnitType, InlineElementRef } from '../../shared/types';
 
 /**
  * 永久跳过的标签（内部文本完全不扫描）
@@ -34,6 +34,13 @@ const SKIP_CLASS_KEYWORDS = [
   'cookie', 'banner', 'ad', 'advertisement',
   'comment', 'social', 'share',
 ];
+
+/**
+ * 语义行内标签：整体占位，不拆分内部 Text 节点
+ * <a> 超链接：保持 href/class/target 等全部属性，防止链接被撕裂
+ * <sup>/<sub>：上下标，整体保留语义
+ */
+const SEMANTIC_INLINE_TAGS = new Set(['a', 'sup', 'sub']);
 
 /** 视口内优先级 */
 const VIEWPORT_PRIORITY = 10;
@@ -84,6 +91,13 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
       acceptNode: (node: Text): number => {
         if (isInsideSkippedArea(node)) return NodeFilter.FILTER_REJECT;
 
+        // FIX: 跳过 <a>/<sup>/<sub> 内部的 Text 节点，防止链接被切割
+        // 这些语义行内元素将在 serializeWithPlaceholders 中作为整体占位符处理
+        const directParent = node.parentElement;
+        if (directParent && SEMANTIC_INLINE_TAGS.has(directParent.tagName.toLowerCase())) {
+          return NodeFilter.FILTER_REJECT;
+        }
+
         const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
         if (!text) return NodeFilter.FILTER_REJECT;
 
@@ -92,7 +106,7 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
     }
   );
 
-  // 收集文本节点，按父元素分组
+  // 收集文本节点，按父元素分组（<a> 内部文本已被排除）
   let textNode: Text | null;
   while ((textNode = walker.nextNode() as Text | null)) {
     const raw = (textNode.textContent || '').replace(/\s+/g, ' ').trim();
@@ -116,31 +130,96 @@ function scanTextNodes(root: HTMLElement): TranslationUnit[] {
     parentMap.get(parent)!.push(raw);
   }
 
-  // 组装 TranslationUnit
+  // 组装 TranslationUnit：使用占位符序列化保留 <a> 完整性
   const units: TranslationUnit[] = [];
-  for (const [parent, texts] of parentMap) {
-    const combinedText = texts.join(' ');
-    if (combinedText.length < 8) continue;
+  const processedElements = new Set<HTMLElement>();
+
+  for (const [parent] of parentMap) {
+    // 检查祖先链是否已处理（避免 <p> 的 text 被包含到父 <div> 中重复处理）
+    if (processedElements.has(parent)) continue;
 
     const tagName = parent.tagName.toLowerCase();
+
+    // 使用占位符序列化：childNodes 中的 <a> 生成 {{TAG_N}} 占位符
+    const { text, refs } = serializeWithPlaceholders(parent);
+
+    // 去掉占位符后的纯文本长度检查
+    const plainText = text.replace(/\{\{TAG_\d+\}\}/g, '').replace(/\s+/g, ' ').trim();
+    if (plainText.length < 8) continue;
+
     const inViewport = isInViewport(parent);
 
     const unit: TranslationUnit = {
       id: `dt-${++idCounter}`,
       type: determineUnitType(tagName),
       element: parent,
-      originalText: combinedText,
+      originalText: text,
       htmlContext: tagName,
       contextChain: buildContextChain(parent),
       isInShadowDOM: false,
       isInIframe: false,
       priority: inViewport ? VIEWPORT_PRIORITY : 0,
+      inlineRefs: refs.length > 0 ? refs : undefined,
     };
 
     units.push(unit);
+    processedElements.add(parent);
   }
 
   return units;
+}
+
+/**
+ * 序列化父容器文本，将 <a>/<sup>/<sub> 替换为 {{TAG_N}} 占位符
+ *
+ * 遍历父容器的直接子节点（childNodes）：
+ * - Text 节点 → 直接拼接
+ * - <a>/<sup>/<sub> → 生成 {{TAG_N}} 占位符，保存原始 DOM 引用
+ * - code/pre → 跳过整棵子树（FILTER_REJECT 等效）
+ * - br → 空格
+ * - 其他元素 → 提取 innerText
+ *
+ * 占位符不含链接文字，LLM 看到的是纯占位符标记，
+ * 确保 LLM 不会修改/撕裂超链接的文本内容。
+ */
+function serializeWithPlaceholders(
+  element: HTMLElement
+): { text: string; refs: InlineElementRef[] } {
+  let result = '';
+  const refs: InlineElementRef[] = [];
+  let tagIdx = 0;
+
+  for (const child of element.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      result += child.textContent || '';
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      const el = child as HTMLElement;
+      const tag = el.tagName.toLowerCase();
+
+      // code/pre 整棵子树跳过（FILTER_REJECT 等效）
+      if (SKIP_TAGS.has(tag)) continue;
+
+      // 语义行内标签：整体占位，不拆分内部文本
+      if (SEMANTIC_INLINE_TAGS.has(tag)) {
+        const placeholder = `{{TAG_${tagIdx}}}`;
+        const innerText = (el.innerText || el.textContent || '').trim();
+        refs.push({ placeholder, element: el, originalText: innerText });
+        // 占位符两侧加空格，确保 LLM 识别为独立 token
+        result += ` {{TAG_${tagIdx}}} `;
+        tagIdx++;
+      } else if (tag === 'br') {
+        result += ' ';
+      } else {
+        // 其他元素：提取文本，不展开子结构
+        result += el.innerText || el.textContent || '';
+      }
+    }
+  }
+
+  return {
+    text: result.replace(/\s+/g, ' ').trim(),
+    refs,
+  };
 }
 
 /**

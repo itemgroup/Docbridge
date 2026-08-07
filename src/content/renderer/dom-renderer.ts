@@ -1,6 +1,6 @@
-// 译文渲染引擎 | 零侵入 DOM 插入
-// 核心原则：不修改原始 DOM 节点，不替换/删除原文
-import type { TranslatedUnit, DisplayMode } from '../../shared/types';
+// 译文渲染引擎 v2 | 零侵入 DOM 插入 + 占位符回填
+// 核心原则：不修改原始 DOM 节点，不替换/删除原文，不使用 innerHTML
+import type { TranslatedUnit, DisplayMode, InlineElementRef } from '../../shared/types';
 
 /** data-dt-translated 标记属性名 */
 const TRANSLATED_ATTR = 'data-dt-translated';
@@ -50,9 +50,15 @@ export function renderTranslation(
 
 /**
  * 创建译文桥接节点
+ *
+ * 核心：解析 LLM 返回文本中的 {{TAG_N}} 占位符
+ * - {{TAG_N}} → 深克隆原始 <a> DOM（保留 href/class/target 等全部属性）
+ * - 普通文本 → createTextNode
+ * - 全程禁止 innerHTML，不拆分/撕裂链接标签
  */
 function createBridgeNode(unit: TranslatedUnit): HTMLElement {
-  const { id, translatedText } = unit;
+  const { id, translatedText, originalUnit } = unit;
+  const inlineRefs: InlineElementRef[] = originalUnit.inlineRefs || [];
 
   const wrapper = document.createElement('span');
   wrapper.className = BRIDGE_CLASS;
@@ -62,10 +68,39 @@ function createBridgeNode(unit: TranslatedUnit): HTMLElement {
   wrapper.style.cssText =
     'display:block;margin-top:6px;padding:6px 0 6px 10px;border-left:3px solid #1890ff;font-size:0.95em;line-height:1.6;color:#333;';
 
-  // 使用 title 属性展示完整译文（超长时 hover 可见）
-  wrapper.title = translatedText;
+  // 无行内引用 → 纯文本模式
+  if (inlineRefs.length === 0) {
+    wrapper.title = translatedText;
+    wrapper.textContent = translatedText;
+    return wrapper;
+  }
 
-  wrapper.textContent = translatedText;
+  // FIX: 解析占位符 {{TAG_N}}，区分普通文本与语义行内元素(a/sup/sub)
+  // 使用 split 而非 replace，保留片段顺序
+  const placeholderPattern = /(\{\{TAG_\d+\}\})/g;
+  const parts = translatedText.split(placeholderPattern);
+
+  for (const part of parts) {
+    if (!part) continue;
+
+    const match = part.match(/^\{\{TAG_(\d+)\}\}$/);
+    if (match) {
+      const idx = parseInt(match[1], 10);
+      const ref = inlineRefs[idx];
+      if (ref && ref.element) {
+        // FIX: 语义行内元素(a/sup/sub) → 深克隆完整 DOM
+        // cloneNode(true) 保留 href、class、target、子节点树等全部属性
+        // 不使用 innerHTML，不拆分/修改 <a> 标签内部文字
+        const clone = ref.element.cloneNode(true) as HTMLElement;
+        wrapper.appendChild(clone);
+      }
+    } else if (part.trim()) {
+      // 普通译文文本片段 → createTextNode
+      wrapper.appendChild(document.createTextNode(part));
+    }
+  }
+
+  wrapper.title = translatedText;
   return wrapper;
 }
 
