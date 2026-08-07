@@ -1,188 +1,130 @@
 # DocBridge
 
-基于 AI 的 Chrome 浏览器扩展，将英文技术文档翻译为中文——不破坏原始网页结构。
+一键将英文技术文档页面翻译为中文的 Chrome 浏览器扩展。
 
-## 功能特性
+**不破坏网页原本的排版和结构**——翻译后的页面保持原有样式，链接正常可点，代码块原封不动，就像原生中文页面一样。
 
-| 功能 | 说明 |
+## 效果截图
+
+点击扩展图标，点击 **"翻译本页"**，页面会在每段英文下方自动生成中文译文：
+
+```
+原文：The OpenVINO toolkit enables you to run deep learning models.
+
+译文：OpenVINO 工具套件让你能够运行深度学习模型。
+```
+
+三种显示模式随时切换：**双语对照** / **仅译文** / **仅原文**。
+
+## 安装
+
+### 方式一：开发者模式加载（当前阶段）
+
+1. 下载本项目代码
+2. 打开 Chrome，地址栏输入 `chrome://extensions`，回车
+3. 打开右上角 **开发者模式** 开关
+4. 点击 **加载已解压的扩展程序**
+5. 选择项目中的 `dist` 文件夹
+6. 完成
+
+### 方式二：Chrome 应用商店
+
+> 尚未上架，敬请期待。
+
+## 使用
+
+### 1. 配置 API Key
+
+首次使用前，需要配置 DeepSeek 翻译服务的 API Key：
+
+1. 浏览器右上角找到 DocBridge 图标，**右键** → **选项**
+2. 填入你的 [DeepSeek API Key](https://platform.deepseek.com/api_keys)
+3. 保存
+
+> 没有 API Key？去 [platform.deepseek.com](https://platform.deepseek.com) 注册，新用户有免费额度。
+
+### 2. 开始翻译
+
+打开任意英文技术文档页面（比如 [OpenVINO 文档](https://docs.openvino.ai)），点击 DocBridge 图标 → **翻译本页**。
+
+页面底部会出现进度条，显示翻译进度。全部完成后进度条自动消失。
+
+### 3. 切换显示模式
+
+点击 DocBridge 图标，可以在三种模式间切换：
+
+| 模式 | 效果 |
 |------|------|
-| **零侵入 DOM** | 译文作为新节点插入原文下方，原始 class/id/style/事件监听器永不修改 |
-| **链接防撕裂** | `<a>` 超链接通过 `{{TAG_N}}` 占位符保护，LLM 不接触链接文本，翻译后链接完整可点击 |
-| **行内代码保留** | 段落中的 `<code>--pipeline_type LM</code>` 等行内代码片段原样保留在译文对应位置 |
-| **块级代码跳过** | `<pre><code>` 包裹的代码块通过 `FILTER_REJECT` 整棵子树跳过，完全不翻译 |
-| **智能句子合并** | 被 `<span>`、`<em>` 等行内元素打断的句子，通过向上查找块级祖先归并到同一个翻译单元 |
-| **SPA 增量翻译** | `MutationObserver` 监听 DOM 变化，页面动态加载的内容自动增量翻译 |
-| **双语对照显示** | 三种模式：双语对照 / 仅译文 / 仅原文，一键切换 |
-| **悬浮进度条** | 页面底部固定进度指示器，显示已完成/总数，单例复用不闪烁，完成后自动消失 |
-| **翻译缓存** | 基于 IndexedDB（Dexie.js v4）的翻译缓存，已翻译页面秒开 |
+| **双语对照** | 原文在上，中文译文在下，方便对照阅读 |
+| **仅译文** | 隐藏英文原文，只看中文 |
+| **仅原文** | 恢复原始英文页面 |
 
-## 技术栈
+也可以点击页面右下角的悬浮按钮快速切换。
 
-| 层级 | 技术 |
-|------|------|
-| 平台 | Chrome Extension Manifest V3 |
-| 语言 | TypeScript（strict 严格模式，禁用 `any`） |
-| 构建 | Vite（多入口）+ 自定义 IIFE 构建脚本 |
-| 存储 | `chrome.storage.local` + IndexedDB（Dexie.js v4） |
-| 翻译 API | DeepSeek（`deepseek-chat` 模型，通过 `fetch` 调用） |
-| 测试 | Vitest |
-| 样式 | 原生 CSS（不引入 React/Vue/Tailwind，扩展体积 < 2MB） |
+### 4. 滚动加载的内容
 
-## 项目结构
+浏览文档时，如果页面滚动加载了新内容（SPA 页面常见），DocBridge 会自动检测并翻译新增部分，无需再次手动点击。
 
-```
-docbridge/
-├── manifest.json
-├── package.json
-├── vite.config.ts
-├── tsconfig.json
-├── scripts/
-│   └── build.mjs              # 自定义多入口 IIFE 构建脚本
-├── src/
-│   ├── shared/
-│   │   ├── types.ts            # 全局类型定义（核心契约）
-│   │   ├── constants.ts        # 常量、API 配置、系统提示词
-│   │   └── storage/
-│   │       └── indexeddb.ts    # Dexie.js IndexedDB 封装
-│   ├── background/
-│   │   ├── index.ts            # Service Worker：消息路由、缓存管理
-│   │   └── provider/
-│   │       └── deepseek.ts     # DeepSeek API 客户端
-│   ├── content/
-│   │   ├── index.ts            # 内容脚本入口：翻译全流程组装
-│   │   ├── scanner/
-│   │   │   └── dom-scanner.ts  # 基于 TreeWalker 的 DOM 扫描 + 占位符序列化
-│   │   ├── analyzer/
-│   │   │   └── unit-builder.ts # 翻译单元批处理 + 优先级排序
-│   │   ├── translator/
-│   │   │   └── translation-queue.ts  # 滑动窗口并发翻译队列
-│   │   ├── renderer/
-│   │   │   └── dom-renderer.ts # 零侵入 DOM 渲染 + {{TAG_N}} 占位符回填
-│   │   └── ui/
-│   │       └── progress-bar.ts # 页面底部悬浮进度条（单例复用）
-│   ├── popup/
-│   │   ├── index.html
-│   │   ├── index.ts
-│   │   └── popup.css
-│   └── options/
-│       ├── index.html
-│       ├── index.ts
-│       └── options.css
-└── dist/                       # 构建输出（Chrome 扩展加载此目录）
-```
+进度条会更新总数，继续平滑推进。
 
-## 快速开始
+### 5. 清除翻译
 
-### 环境要求
+点击 **清除翻译** 或刷新页面即可恢复原始英文页面。
 
-- Node.js 18+
-- Chrome / Edge（Chromium 内核）
+## 特别说明
 
-### 安装依赖
+### 什么不会被翻译
 
-```bash
-npm install
-```
+为确保技术文档的准确性，以下内容**保持原文不动**：
 
-### 构建
+- **代码块**：`<pre><code>` 包裹的全部代码
+- **行内代码**：句子中的 `--pipeline_type LM` 等命令/标识符
+- **超链接**：`<a>` 标签完整保留，链接文字不翻译，链接不会失效
+- **技术术语**：React、API、Docker 等常见术语保留英文
 
-```bash
-# 清理 + 构建（推荐）
-npm run build:clean
+### 哪些页面适合用
 
-# 仅构建（不清理 dist/）
-npm run build
-```
+DocBridge 专为**技术文档**优化，效果最好的页面类型：
 
-### 加载到 Chrome
+- 开源项目文档（OpenVINO、NVIDIA NIM 等）
+- API 参考文档
+- 技术教程和指南
+- 开发者博客
 
-1. 打开 `chrome://extensions`
-2. 开启右上角 **开发者模式**
-3. 点击 **加载已解压的扩展程序**
-4. 选择项目的 `dist/` 目录（注意：不是 `src/` 目录）
+### 不推荐的页面
 
-### 配置
+- 社交媒体、新闻网站（非技术内容，翻译风格不匹配）
+- 大量表格/表单的页面
+- 已含大量中文的混合页面
 
-1. 右键点击扩展图标 → **选项**
-2. 填入 [DeepSeek API Key](https://platform.deepseek.com/)
-3. （可选）配置术语表、显示模式等
+## 常见问题
 
-## 工作原理
+**Q: 翻译一页需要多久？**
 
-### 翻译管线
+视页面内容多少，通常 3-10 秒。已翻译过的页面会缓存，再次打开秒加载。
 
-```
-网页正文内容
-    │
-    ▼
-DOM 扫描器（TreeWalker）
-    │  • 跳过导航/侧边栏/页脚/广告区域
-    │  • FILTER_REJECT 跳过 <pre> 代码块
-    │  • 按块级祖先分组文本节点
-    │
-    ▼
-占位符序列化
-    │  • <a>/<code>/<sup>/<sub> → {{TAG_N}} 占位符
-    │  • 递归展开行内子元素（穿透 <span>/<em>）
-    │
-    ▼
-翻译队列（滑动窗口）
-    │  • 最多 3 个并发请求
-    │  • 指数退避重试（最多 3 次）
-    │  • 单次请求 10s 超时
-    │
-    ▼
-DOM 渲染器
-    │  • 解析 LLM 返回文本中的 {{TAG_N}} 占位符
-    │  • 通过 cloneNode(true) 深克隆原始 <a>/<code> 元素
-    │  • 使用 createTextNode() 创建文本节点
-    │  • 翻译管线零 innerHTML 使用
-    │
-    ▼
-双语对照显示
-       • 原文 DOM 结构完全不变
-       • 译文追加为 <span class="dt-bridge"> 兄弟节点
-       • CSS 切换双语/仅译文/仅原文三种显示模式
-```
+**Q: 会影响网页原本的功能吗？**
 
-### 占位符协议
+不会。DocBridge 只在原文下方**追加**译文节点，不修改、不删除网页原来的任何元素。
 
-`{{TAG_N}}` 占位符是保护行内元素不被 LLM 破坏的核心机制：
+**Q: API 调用会花多少钱？**
 
-| 元素 | 占位符 | LLM 看到的 | 渲染器处理 |
-|------|--------|-----------|-----------|
-| `<a href="/docs">文档</a>` | `{{TAG_0}}` | `{{TAG_0}}`（纯占位符） | `cloneNode(true)` → 完整保留链接 |
-| `<code>--flag</code>`（行内） | `{{TAG_1}}` | `{{TAG_1}}`（纯占位符） | `cloneNode(true)` → 代码原样保留 |
-| `<pre><code>...</code></pre>` | 跳过 | 不会发给 LLM | FILTER_REJECT 整棵子树 |
+DeepSeek 的 `deepseek-chat` 模型价格很低，翻译一页典型技术文档约消耗几千 token，成本不到 1 分钱。新用户注册有 500 万 token 免费额度。
 
-LLM 系统提示词明确要求：`【强制】{{TAG_N}}占位符(链接或代码)原样保留不译`
+**Q: 支持其他翻译服务吗？**
 
-### 关键设计决策
+目前仅支持 DeepSeek。未来可能接入更多服务商。
 
-- **块级 vs 行内切割**：只有块级元素（`p`/`div`/`li`/`h1-h6` 等）才切割翻译单元边界；`span`/`em`/`strong` 等行内容器不切割，递归深挖确保同一句子归入一个翻译单元
-- **单例进度条**：进度条全局仅一个实例，新任务到来时复用已有 DOM，取消销毁定时器，不闪烁不重复创建
-- **Observer 缓存队列**：翻译进行中，MutationObserver 仍收集新增节点到 `pendingNewNodes`，等当前轮完成后再消费，避免翻译期间丢失增量内容
-- **防重入锁**：`isTranslating` + `isLocked` 双重布尔锁，防止 Observer 和手动翻译并发冲突
+**Q: 翻译质量怎么样？**
 
-## NPM 脚本
+DeepSeek 模型在技术文档翻译上表现优秀，忠于原文含义且表达自然。对专业术语和代码片段有明确的保护规则。
 
-```json
-{
-  "clean": "node -e \"require('fs').rmSync('dist', {recursive:true, force:true})\"",
-  "build": "node scripts/build.mjs",
-  "build:clean": "npm run clean && npm run build",
-  "dev": "node scripts/build.mjs"
-}
-```
+## 隐私
 
-## 开发规范
-
-- 字符串使用单引号，缩进 2 空格
-- 函数不超过 50 行，超过必须拆分
-- 所有导出函数必须有 JSDoc 注释
-- 禁止使用 `any`，所有类型必须显式定义
-- 异步操作必须有 `try/catch`，网络请求必须有超时
-- 每次只改一个模块，修改后必须运行 `npm run build` 验证
+- API Key 仅存储在你的浏览器本地（`chrome.storage.local`）
+- 翻译请求直接发送到 DeepSeek API，不经任何第三方服务器
+- 不收集任何使用数据
+- 开源可审计
 
 ## 许可证
 
